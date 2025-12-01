@@ -124,12 +124,13 @@ await Actor.main(async () => {
     };
 
     async function searchAlgoliaJobs(query, page = 0) {
+        const generatedHeaders = headerGenerator.getHeaders();
         const headers = {
             'X-Algolia-Application-Id': ALGOLIA_APP_ID,
             'X-Algolia-API-Key': ALGOLIA_API_KEY,
             'X-Algolia-Agent': 'Algolia for JavaScript (4.x); Apify Actor',
             'Content-Type': 'application/json',
-            'User-Agent': headerGenerator.getHeaders().['user-agent'],
+            'User-Agent': generatedHeaders['user-agent'],
             Referer: 'https://www.welcometothejungle.com/',
         };
 
