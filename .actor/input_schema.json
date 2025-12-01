@@ -22,7 +22,7 @@
       "title": "Contract Type",
       "type": "array",
       "description": "Filter by employment contract types.",
-      "editor": "stringList",
+      "editor": "select",
       "items": {
         "type": "string",
         "enum": ["full_time", "part_time", "internship", "apprenticeship", "freelance", "fixed_term"]
@@ -33,7 +33,7 @@
       "title": "Remote Work Options",
       "type": "array",
       "description": "Filter by remote work flexibility.",
-      "editor": "stringList",
+      "editor": "select",
       "items": {
         "type": "string",
         "enum": ["fulltime", "partial", "punctual", "no"]
