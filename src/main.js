@@ -1,4 +1,6 @@
+// main.js
 // Welcome to the Jungle jobs scraper - Algolia JSON API + HTML fallback (production-ready)
+
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
@@ -30,7 +32,12 @@ function extractFromJsonLd($) {
             for (const e of arr) {
                 if (!e) continue;
                 const t = e['@type'] || e.type;
-                if (t === 'JobPosting' || (Array.isArray(t) && t.includes('JobPosting'))) {
+                const isJobPosting =
+                    t === 'JobPosting' ||
+                    (Array.isArray(t) && t.includes('JobPosting')) ||
+                    (Array.isArray(t) && t.includes('https://schema.org/JobPosting'));
+
+                if (isJobPosting) {
                     return {
                         title: e.title || e.name || null,
                         company: e.hiringOrganization?.name || null,
@@ -40,7 +47,8 @@ function extractFromJsonLd($) {
                             (e.jobLocation &&
                                 e.jobLocation.address &&
                                 (e.jobLocation.address.addressLocality ||
-                                    e.jobLocation.address.addressRegion)) ||
+                                    e.jobLocation.address.addressRegion ||
+                                    e.jobLocation.address.addressCountry)) ||
                             null,
                         salary: e.baseSalary?.value?.value || e.baseSalary?.value || null,
                         job_id: e.identifier?.value || e.identifier || null,
@@ -48,7 +56,7 @@ function extractFromJsonLd($) {
                 }
             }
         } catch {
-            // ignore parsing errors
+            // ignore broken JSON-LD blocks
         }
     }
     return null;
@@ -63,15 +71,23 @@ const extractJobsFromNextData = (raw) => {
         if (!cur || typeof cur !== 'object') continue;
         if (seen.has(cur)) continue;
         seen.add(cur);
+
         if (Array.isArray(cur)) {
             for (const e of cur) queue.push(e);
             continue;
         }
+
         const keys = Object.keys(cur);
         const hasSlug = 'slug' in cur;
         const hasOrg = 'organization_slug' in cur || 'organization' in cur;
-        if (hasSlug && hasOrg) jobs.push(cur);
-        for (const k of keys) queue.push(cur[k]);
+
+        if (hasSlug && hasOrg) {
+            jobs.push(cur);
+        }
+
+        for (const k of keys) {
+            queue.push(cur[k]);
+        }
     }
     return jobs;
 };
@@ -85,11 +101,11 @@ const pickUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
 
 // ----------------- Main actor -----------------
 
-await Actor.main(async () => {
+Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
     const {
         keyword = '',
-        // IMPORTANT: This is ISO country code (e.g. "FR", "US"), NOT a free text city
+        // IMPORTANT: This is ISO country code (e.g. "FR", "US"), NOT a free-text city
         location = '',
         contract_type = [],
         remote = [],
@@ -98,11 +114,10 @@ await Actor.main(async () => {
         collectDetails = true,
         proxyConfiguration,
         useAlgoliaAPI = true,
-        // optional override; if user doesn't have a key we fall back to the built-in one
+        // optional: if user has their own Algolia key
         algoliaApiKey,
     } = input;
 
-    // Log input once for debugging / transparency
     log.info('Actor input', {
         keyword,
         location,
@@ -125,7 +140,10 @@ await Actor.main(async () => {
         );
     }
 
-    const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration({ ...proxyConfiguration }) : undefined;
+    const proxyConf = proxyConfiguration
+        ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
+        : undefined;
+
     const seenIds = new Set();
     const seenUrls = new Set();
     let saved = 0;
@@ -133,6 +151,7 @@ await Actor.main(async () => {
     // ----------------- Algolia constants (built-in key, user override optional) -----------------
 
     const ALGOLIA_APP_ID = 'CSEKHVMS53';
+    // built-in key used if user doesn't supply one
     const ALGOLIA_API_KEY = algoliaApiKey || '4bd8f6215d0cc52b26430765769e65a0';
     const ALGOLIA_INDEX = 'wttj_jobs_production_en';
 
@@ -142,10 +161,15 @@ await Actor.main(async () => {
 
     const buildFacetFilters = () => {
         const facets = [];
-        if (location && location.trim()) facets.push([`offices.country_code:${location.toUpperCase()}`]);
-        if (Array.isArray(contract_type) && contract_type.length)
+        if (location && location.trim()) {
+            facets.push([`offices.country_code:${location.toUpperCase()}`]);
+        }
+        if (Array.isArray(contract_type) && contract_type.length) {
             facets.push(contract_type.map((ct) => `contract_type:${ct}`));
-        if (Array.isArray(remote) && remote.length) facets.push(remote.map((r) => `remote:${r}`));
+        }
+        if (Array.isArray(remote) && remote.length) {
+            facets.push(remote.map((r) => `remote:${r}`));
+        }
         return facets;
     };
 
@@ -213,7 +237,11 @@ await Actor.main(async () => {
 
         if (response.statusCode !== 200) {
             const message = response.body?.message || response.body?.error || '';
-            throw new Error(`Algolia API returned ${response.statusCode} ${response.statusMessage || ''} ${message}`);
+            throw new Error(
+                `Algolia API returned ${response.statusCode} ${
+                    response.statusMessage || ''
+                } ${message}`.trim(),
+            );
         }
 
         const result = response.body?.results?.[0];
@@ -248,7 +276,9 @@ await Actor.main(async () => {
             const jsonLd = extractFromJsonLd($detail);
             if (jsonLd) {
                 jobData.description_html = jsonLd.description_html || jobData.description_html;
-                jobData.description_text = cleanText(jsonLd.description_html || jobData.description_text || '');
+                jobData.description_text = cleanText(
+                    jsonLd.description_html || jobData.description_text || '',
+                );
                 jobData.title = jobData.title || jsonLd.title;
                 jobData.company = jobData.company || jsonLd.company;
                 jobData.location = jobData.location || jsonLd.location;
@@ -259,8 +289,10 @@ await Actor.main(async () => {
                 '[data-testid="job-description"], .job-description, [class*="description"]',
             ).first();
             if (descContainer.length) {
-                jobData.description_html = jobData.description_html || descContainer.html();
-                jobData.description_text = jobData.description_text || cleanText(descContainer.html());
+                jobData.description_html =
+                    jobData.description_html || descContainer.html() || null;
+                jobData.description_text =
+                    jobData.description_text || cleanText(descContainer.html());
             }
             return jobData;
         } catch (err) {
@@ -275,6 +307,7 @@ await Actor.main(async () => {
         log.info('Using Algolia API as primary source');
         let currentPage = 0;
         let hasMore = true;
+
         try {
             while (saved < RESULTS_WANTED && currentPage < MAX_PAGES && hasMore) {
                 const result = await searchAlgoliaJobs(keyword, currentPage);
@@ -284,6 +317,7 @@ await Actor.main(async () => {
                         result.nbHits ?? 'n/a'
                     })`,
                 );
+
                 if (!hits.length) {
                     log.warning(
                         `Algolia returned 0 hits at page ${currentPage}; facetFilters=${JSON.stringify(
@@ -340,10 +374,14 @@ await Actor.main(async () => {
         const u = new URL('https://www.welcometothejungle.com/en/jobs');
         if (keyword) u.searchParams.set('query', keyword);
         if (location) u.searchParams.set('refinementList[offices.country_code][]', location.toUpperCase());
-        if (Array.isArray(remote) && remote.length)
+        if (Array.isArray(remote) && remote.length) {
             remote.forEach((r) => u.searchParams.append('refinementList[remote][]', r));
-        if (Array.isArray(contract_type) && contract_type.length)
-            contract_type.forEach((ct) => u.searchParams.append('refinementList[contract_type][]', ct));
+        }
+        if (Array.isArray(contract_type) && contract_type.length) {
+            contract_type.forEach((ct) =>
+                u.searchParams.append('refinementList[contract_type][]', ct),
+            );
+        }
         u.searchParams.set('page', String(page));
         return u.href;
     };
@@ -362,7 +400,9 @@ await Actor.main(async () => {
                     'Accept-Language': 'en-US,en;q=0.9',
                     Referer: 'https://www.welcometothejungle.com/',
                 };
-                if (session?.id) request.headers['X-Session-Id'] = session.id;
+                if (session?.id) {
+                    request.headers['X-Session-Id'] = session.id;
+                }
             },
         ],
         async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
@@ -372,17 +412,32 @@ await Actor.main(async () => {
             if (label === 'LIST') {
                 crawlerLog.info(`Processing search page ${pageNo}`);
 
+                // ---- JOB LINK DISCOVERY (FIXED) ----
                 const jobLinks = [];
                 $('a[href*="/jobs/"]').each((_, el) => {
                     const href = $(el).attr('href');
-                    if (href && /\/companies\/[^/]+\/jobs\/[^/]+/.test(href)) {
-                        const fullUrl = toAbs(href);
-                        if (fullUrl && !jobLinks.includes(fullUrl)) jobLinks.push(fullUrl);
+                    const fullUrl = toAbs(href);
+                    if (fullUrl && !jobLinks.includes(fullUrl)) {
+                        jobLinks.push(fullUrl);
                     }
                 });
+
                 crawlerLog.info(`Found ${jobLinks.length} job links on page ${pageNo}`);
 
-                // If no links found, attempt to parse embedded Next.js data for jobs
+                if (jobLinks.length === 0) {
+                    crawlerLog.warning(
+                        `No job links found on page ${pageNo}, dumping small HTML snippet`,
+                    );
+                    crawlerLog.debug($.html().slice(0, 1500));
+                } else {
+                    crawlerLog.debug(
+                        `Sample job links from page ${pageNo}: ${jobLinks
+                            .slice(0, 5)
+                            .join(', ')}`,
+                    );
+                }
+
+                // If we still have no links, try __NEXT_DATA__ heuristic
                 if (jobLinks.length === 0) {
                     const nextDataScript =
                         $('script#__NEXT_DATA__').first().html() ||
@@ -445,7 +500,7 @@ await Actor.main(async () => {
                             }
                         } catch (err) {
                             crawlerLog.warning(
-                                `Failed to parse __NEXT_DATA__: ${err.message}`,
+                                `Failed to parse __NEXT_DATA__ on page ${pageNo}: ${err.message}`,
                             );
                         }
                     }
@@ -464,6 +519,7 @@ await Actor.main(async () => {
                         });
                     }
                 } else if (jobLinks.length) {
+                    // Fast mode: just store URLs from LIST page
                     const remaining = RESULTS_WANTED - saved;
                     const toPush = jobLinks.slice(0, Math.max(0, remaining));
                     for (const url of toPush) {
@@ -542,12 +598,13 @@ await Actor.main(async () => {
                     };
 
                     const stored = await pushJob(item);
-                    if (stored)
+                    if (stored) {
                         crawlerLog.info(
                             `Saved job ${saved}/${RESULTS_WANTED}: ${
                                 item.title || 'Untitled'
                             }`,
                         );
+                    }
                 } catch (err) {
                     crawlerLog.error(
                         `DETAIL ${request.url} failed: ${err.message}`,
