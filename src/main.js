@@ -1,12 +1,18 @@
 // main.js
-// Welcome to the Jungle jobs scraper - Algolia JSON API + HTML fallback (production-ready)
+// Welcome to the Jungle jobs scraper - pure HTTP + Next.js JSON (__NEXT_DATA__), no Playwright, no Algolia.
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
-import { gotScraping } from 'got-scraping';
 
-// ----------------- Shared helpers -----------------
+// ------------- Helpers -------------
+
+const cleanText = (html) => {
+    if (!html) return '';
+    const $ = cheerioLoad(html);
+    $('script, style, noscript, iframe').remove();
+    return $.root().text().replace(/\s+/g, ' ').trim();
+};
 
 const toAbs = (href, base = 'https://www.welcometothejungle.com') => {
     try {
@@ -16,56 +22,12 @@ const toAbs = (href, base = 'https://www.welcometothejungle.com') => {
     }
 };
 
-const cleanText = (html) => {
-    if (!html) return '';
-    const $ = cheerioLoad(html);
-    $('script, style, noscript, iframe').remove();
-    return $.root().text().replace(/\s+/g, ' ').trim();
-};
-
-function extractFromJsonLd($) {
-    const scripts = $('script[type="application/ld+json"]');
-    for (let i = 0; i < scripts.length; i++) {
-        try {
-            const parsed = JSON.parse($(scripts[i]).html() || '');
-            const arr = Array.isArray(parsed) ? parsed : [parsed];
-            for (const e of arr) {
-                if (!e) continue;
-                const t = e['@type'] || e.type;
-                const isJobPosting =
-                    t === 'JobPosting' ||
-                    (Array.isArray(t) && t.includes('JobPosting')) ||
-                    (Array.isArray(t) && t.includes('https://schema.org/JobPosting'));
-
-                if (isJobPosting) {
-                    return {
-                        title: e.title || e.name || null,
-                        company: e.hiringOrganization?.name || null,
-                        date_posted: e.datePosted || null,
-                        description_html: e.description || null,
-                        location:
-                            (e.jobLocation &&
-                                e.jobLocation.address &&
-                                (e.jobLocation.address.addressLocality ||
-                                    e.jobLocation.address.addressRegion ||
-                                    e.jobLocation.address.addressCountry)) ||
-                            null,
-                        salary: e.baseSalary?.value?.value || e.baseSalary?.value || null,
-                        job_id: e.identifier?.value || e.identifier || null,
-                    };
-                }
-            }
-        } catch {
-            // ignore broken JSON-LD blocks
-        }
-    }
-    return null;
-}
-
-const extractJobsFromNextData = (raw) => {
+function extractJobsFromNextData(raw) {
+    // Generic BFS: collect any objects that look like job postings (have slug + organization_slug)
     const jobs = [];
     const queue = [raw];
     const seen = new Set();
+
     while (queue.length) {
         const cur = queue.shift();
         if (!cur || typeof cur !== 'object') continue;
@@ -89,8 +51,9 @@ const extractJobsFromNextData = (raw) => {
             queue.push(cur[k]);
         }
     }
+
     return jobs;
-};
+}
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -99,23 +62,26 @@ const USER_AGENTS = [
 ];
 const pickUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-// ----------------- Main actor -----------------
+const normalizeContract = (val) =>
+    typeof val === 'string' && val.trim() ? val.trim().toLowerCase() : null;
+const normalizeRemote = (val) =>
+    typeof val === 'string' && val.trim() ? val.trim().toLowerCase() : null;
 
-Actor.main(async () => {
+// ------------- Main actor -------------
+
+await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
+
     const {
         keyword = '',
-        // IMPORTANT: This is ISO country code (e.g. "FR", "US"), NOT a free-text city
+        // IMPORTANT: ISO country code (e.g. "FR", "US") – but can be blank.
         location = '',
         contract_type = [],
         remote = [],
-        results_wanted: RESULTS_WANTED_RAW = 100,
-        max_pages: MAX_PAGES_RAW = 20,
-        collectDetails = true,
+        results_wanted: RESULTS_WANTED_RAW = 50,
+        max_pages: MAX_PAGES_RAW = 10,
         proxyConfiguration,
-        useAlgoliaAPI = true,
-        // optional: if user has their own Algolia key
-        algoliaApiKey,
+        maxConcurrency = 4,
     } = input;
 
     log.info('Actor input', {
@@ -125,18 +91,20 @@ Actor.main(async () => {
         remote,
         RESULTS_WANTED_RAW,
         MAX_PAGES_RAW,
-        collectDetails,
-        useAlgoliaAPI,
-        hasUserAlgoliaKey: Boolean(algoliaApiKey),
+        maxConcurrency,
     });
 
-    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 100;
-    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
+    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW)
+        ? Math.max(1, +RESULTS_WANTED_RAW)
+        : 50;
+    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW)
+        ? Math.max(1, +MAX_PAGES_RAW)
+        : 10;
 
     if (location && location.length > 3) {
         log.warning(
             `location="${location}" looks like a name, not an ISO country code (e.g. "FR"). ` +
-                'This may reduce Algolia results; HTML fallback will still try to find jobs.',
+                'This may reduce or skew results, as filters expect country codes.',
         );
     }
 
@@ -148,112 +116,6 @@ Actor.main(async () => {
     const seenUrls = new Set();
     let saved = 0;
 
-    // ----------------- Algolia constants (built-in key, user override optional) -----------------
-
-    const ALGOLIA_APP_ID = 'CSEKHVMS53';
-    // built-in key used if user doesn't supply one
-    const ALGOLIA_API_KEY = algoliaApiKey || '4bd8f6215d0cc52b26430765769e65a0';
-    const ALGOLIA_INDEX = 'wttj_jobs_production_en';
-
-    if (useAlgoliaAPI && !ALGOLIA_API_KEY) {
-        throw new Error('useAlgoliaAPI is true but no ALGOLIA_API_KEY is available.');
-    }
-
-    const buildFacetFilters = () => {
-        const facets = [];
-        if (location && location.trim()) {
-            facets.push([`offices.country_code:${location.toUpperCase()}`]);
-        }
-        if (Array.isArray(contract_type) && contract_type.length) {
-            facets.push(contract_type.map((ct) => `contract_type:${ct}`));
-        }
-        if (Array.isArray(remote) && remote.length) {
-            facets.push(remote.map((r) => `remote:${r}`));
-        }
-        return facets;
-    };
-
-    const buildAlgoliaRequest = (query, page = 0) => {
-        const params = new URLSearchParams({
-            query: query || '',
-            page: String(page),
-            hitsPerPage: '20',
-            analytics: 'false',
-            clickAnalytics: 'false',
-            attributesToRetrieve: [
-                'name',
-                'slug',
-                'organization_name',
-                'organization_slug',
-                'offices',
-                'office',
-                'contract_type',
-                'remote',
-                'salary',
-                'published_at',
-                'description',
-                'objectID',
-            ].join(','),
-            filters: 'archived:false',
-            facetFilters: JSON.stringify(buildFacetFilters()),
-        });
-
-        return {
-            requests: [
-                {
-                    indexName: ALGOLIA_INDEX,
-                    params: params.toString(),
-                },
-            ],
-        };
-    };
-
-    async function searchAlgoliaJobs(query, page = 0) {
-        const headers = {
-            'X-Algolia-Application-Id': ALGOLIA_APP_ID,
-            'X-Algolia-API-Key': ALGOLIA_API_KEY,
-            'X-Algolia-Agent': 'Algolia for JavaScript (4.x); Apify Actor',
-            'Content-Type': 'application/json',
-            'User-Agent': pickUA(),
-            'Accept-Language': 'en-US,en;q=0.9',
-            Referer: 'https://www.welcometothejungle.com/',
-        };
-
-        const body = buildAlgoliaRequest(query, page);
-        const proxyUrl = proxyConf ? await proxyConf.newUrl() : undefined;
-
-        const response = await gotScraping({
-            url: `https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/*/queries`,
-            method: 'POST',
-            headers,
-            body: JSON.stringify(body),
-            throwHttpErrors: false,
-            responseType: 'json',
-            proxyUrl,
-        });
-
-        const hitsLen = (response.body?.results?.[0]?.hits || []).length;
-        log.info(`Algolia status ${response.statusCode} page ${page} hits ${hitsLen}`);
-
-        if (response.statusCode !== 200) {
-            const message = response.body?.message || response.body?.error || '';
-            throw new Error(
-                `Algolia API returned ${response.statusCode} ${
-                    response.statusMessage || ''
-                } ${message}`.trim(),
-            );
-        }
-
-        const result = response.body?.results?.[0];
-        if (!result) throw new Error('Algolia response missing results[0]');
-        return result;
-    }
-
-    const normalizeContract = (value) =>
-        typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
-    const normalizeRemote = (value) =>
-        typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : null;
-
     const pushJob = async (job) => {
         if (job.job_id && seenIds.has(job.job_id)) return false;
         if (job.url && seenUrls.has(job.url)) return false;
@@ -264,123 +126,21 @@ Actor.main(async () => {
         return true;
     };
 
-    const enrichDetails = async (jobData) => {
-        if (!collectDetails || !jobData.url) return jobData;
-        try {
-            const response = await gotScraping({
-                url: jobData.url,
-                proxyUrl: proxyConf ? await proxyConf.newUrl() : undefined,
-                headers: { 'User-Agent': pickUA() },
-            });
-            const $detail = cheerioLoad(response.body);
-            const jsonLd = extractFromJsonLd($detail);
-            if (jsonLd) {
-                jobData.description_html = jsonLd.description_html || jobData.description_html;
-                jobData.description_text = cleanText(
-                    jsonLd.description_html || jobData.description_text || '',
-                );
-                jobData.title = jobData.title || jsonLd.title;
-                jobData.company = jobData.company || jsonLd.company;
-                jobData.location = jobData.location || jsonLd.location;
-                jobData.salary = jobData.salary || jsonLd.salary;
-                jobData.job_id = jobData.job_id || jsonLd.job_id;
-            }
-            const descContainer = $detail(
-                '[data-testid="job-description"], .job-description, [class*="description"]',
-            ).first();
-            if (descContainer.length) {
-                jobData.description_html =
-                    jobData.description_html || descContainer.html() || null;
-                jobData.description_text =
-                    jobData.description_text || cleanText(descContainer.html());
-            }
-            return jobData;
-        } catch (err) {
-            log.warning(`Detail fetch failed for ${jobData.url}: ${err.message}`);
-            return jobData;
-        }
-    };
-
-    // ----------------- Primary: Algolia JSON API -----------------
-
-    if (useAlgoliaAPI) {
-        log.info('Using Algolia API as primary source');
-        let currentPage = 0;
-        let hasMore = true;
-
-        try {
-            while (saved < RESULTS_WANTED && currentPage < MAX_PAGES && hasMore) {
-                const result = await searchAlgoliaJobs(keyword, currentPage);
-                const hits = result.hits || [];
-                log.info(
-                    `Algolia page ${currentPage} returned ${hits.length} hits (nbHits ${
-                        result.nbHits ?? 'n/a'
-                    })`,
-                );
-
-                if (!hits.length) {
-                    log.warning(
-                        `Algolia returned 0 hits at page ${currentPage}; facetFilters=${JSON.stringify(
-                            buildFacetFilters(),
-                        )}`,
-                    );
-                    hasMore = false;
-                    break;
-                }
-
-                for (const job of hits) {
-                    if (saved >= RESULTS_WANTED) break;
-
-                    const jobUrl = toAbs(`/en/companies/${job.organization_slug}/jobs/${job.slug}`);
-                    const item = {
-                        title: job.name || null,
-                        company: job.organization_name || null,
-                        company_slug: job.organization_slug || null,
-                        location:
-                            job.office?.name ||
-                            job.offices?.map((o) => o.name).filter(Boolean).join(', ') ||
-                            'Remote',
-                        country:
-                            job.office?.country_name ||
-                            job.offices?.map((o) => o.country_name).filter(Boolean)[0] ||
-                            null,
-                        contract_type: normalizeContract(job.contract_type),
-                        remote: normalizeRemote(job.remote),
-                        salary: job.salary || null,
-                        date_posted: job.published_at || null,
-                        description_text: job.description ? cleanText(job.description) : null,
-                        url: jobUrl,
-                        job_id: job.objectID || null,
-                        _source: 'algolia',
-                    };
-
-                    const enriched = await enrichDetails(item);
-                    await pushJob(enriched);
-                }
-
-                currentPage++;
-                hasMore = currentPage < result.nbPages;
-            }
-        } catch (err) {
-            log.warning(`Algolia flow failed: ${err.message}. Falling back to HTML crawler.`);
-        }
-
-        log.info(`Algolia phase finished with saved=${saved}`);
-    }
-
-    // ----------------- Fallback: HTML parsing / JSON-LD / __NEXT_DATA__ -----------------
-
     const buildSearchUrl = (page = 1) => {
         const u = new URL('https://www.welcometothejungle.com/en/jobs');
         if (keyword) u.searchParams.set('query', keyword);
-        if (location) u.searchParams.set('refinementList[offices.country_code][]', location.toUpperCase());
-        if (Array.isArray(remote) && remote.length) {
-            remote.forEach((r) => u.searchParams.append('refinementList[remote][]', r));
+        if (location) {
+            u.searchParams.set('refinementList[offices.country_code][]', location.toUpperCase());
         }
-        if (Array.isArray(contract_type) && contract_type.length) {
-            contract_type.forEach((ct) =>
-                u.searchParams.append('refinementList[contract_type][]', ct),
-            );
+        if (Array.isArray(remote)) {
+            remote.forEach((r) => {
+                if (r) u.searchParams.append('refinementList[remote][]', r);
+            });
+        }
+        if (Array.isArray(contract_type)) {
+            contract_type.forEach((ct) => {
+                if (ct) u.searchParams.append('refinementList[contract_type][]', ct);
+            });
         }
         u.searchParams.set('page', String(page));
         return u.href;
@@ -388,237 +148,153 @@ Actor.main(async () => {
 
     const crawler = new CheerioCrawler({
         proxyConfiguration: proxyConf,
-        maxRequestRetries: 3,
+        maxConcurrency,
+        maxRequestRetries: 2,
         useSessionPool: true,
-        maxConcurrency: 4,
-        requestHandlerTimeoutSecs: 90,
+        requestHandlerTimeoutSecs: 60,
         preNavigationHooks: [
-            async ({ request, session }) => {
+            async ({ request }) => {
                 request.headers = {
                     ...(request.headers || {}),
                     'User-Agent': pickUA(),
                     'Accept-Language': 'en-US,en;q=0.9',
                     Referer: 'https://www.welcometothejungle.com/',
                 };
-                if (session?.id) {
-                    request.headers['X-Session-Id'] = session.id;
-                }
             },
         ],
         async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
             const label = request.userData?.label || 'LIST';
             const pageNo = request.userData?.pageNo || 1;
 
-            if (label === 'LIST') {
-                crawlerLog.info(`Processing search page ${pageNo}`);
+            if (label !== 'LIST') return;
 
-                // ---- JOB LINK DISCOVERY (FIXED) ----
-                const jobLinks = [];
-                $('a[href*="/jobs/"]').each((_, el) => {
-                    const href = $(el).attr('href');
-                    const fullUrl = toAbs(href);
-                    if (fullUrl && !jobLinks.includes(fullUrl)) {
-                        jobLinks.push(fullUrl);
-                    }
-                });
+            crawlerLog.info(`Processing LIST page ${pageNo}: ${request.url}`);
 
-                crawlerLog.info(`Found ${jobLinks.length} job links on page ${pageNo}`);
+            // 1) Find the Next.js data script (__NEXT_DATA__ or similar)
+            let nextJsonText =
+                $('script#__NEXT_DATA__').first().html() ||
+                $('script[id="__NEXT_DATA__"]').first().html() ||
+                $('script[type="application/json"][data-nextjs-data]').first().html() ||
+                $('script[type="application/json"][data-next-page]').first().html();
 
-                if (jobLinks.length === 0) {
-                    crawlerLog.warning(
-                        `No job links found on page ${pageNo}, dumping small HTML snippet`,
-                    );
-                    crawlerLog.debug($.html().slice(0, 1500));
-                } else {
-                    crawlerLog.debug(
-                        `Sample job links from page ${pageNo}: ${jobLinks
-                            .slice(0, 5)
-                            .join(', ')}`,
-                    );
-                }
-
-                // If we still have no links, try __NEXT_DATA__ heuristic
-                if (jobLinks.length === 0) {
-                    const nextDataScript =
-                        $('script#__NEXT_DATA__').first().html() ||
-                        $('script[id="__NEXT_DATA__"]').first().html();
-                    if (nextDataScript) {
-                        try {
-                            const parsed = JSON.parse(nextDataScript);
-                            const candidateJobs = extractJobsFromNextData(parsed);
-                            crawlerLog.info(
-                                `Next data heuristic found ${candidateJobs.length} job candidates on page ${pageNo}`,
-                            );
-                            const remaining = RESULTS_WANTED - saved;
-                            for (const job of candidateJobs.slice(
-                                0,
-                                Math.max(0, remaining),
-                            )) {
-                                const url =
-                                    job.slug && job.organization_slug
-                                        ? toAbs(
-                                              `/en/companies/${job.organization_slug}/jobs/${job.slug}`,
-                                          )
-                                        : null;
-                                const item = {
-                                    title: job.name || job.title || null,
-                                    company:
-                                        job.organization_name ||
-                                        job.company ||
-                                        job.organization?.name ||
-                                        null,
-                                    company_slug:
-                                        job.organization_slug ||
-                                        job.organization?.slug ||
-                                        null,
-                                    location:
-                                        job.office?.name ||
-                                        job.offices
-                                            ?.map((o) => o.name)
-                                            .filter(Boolean)
-                                            .join(', ') ||
-                                        job.location ||
-                                        null,
-                                    country:
-                                        job.office?.country_name ||
-                                        job.offices
-                                            ?.map((o) => o.country_name)
-                                            .filter(Boolean)[0] ||
-                                        null,
-                                    contract_type: normalizeContract(job.contract_type),
-                                    remote: normalizeRemote(job.remote),
-                                    salary: job.salary || null,
-                                    date_posted: job.published_at || job.date_posted || null,
-                                    description_text: job.description
-                                        ? cleanText(job.description)
-                                        : null,
-                                    url,
-                                    job_id: job.objectID || job.id || null,
-                                    _source: 'next-data',
-                                };
-                                await pushJob(item);
-                            }
-                        } catch (err) {
-                            crawlerLog.warning(
-                                `Failed to parse __NEXT_DATA__ on page ${pageNo}: ${err.message}`,
-                            );
-                        }
-                    }
-                }
-
-                if (collectDetails && jobLinks.length) {
-                    const remaining = RESULTS_WANTED - saved;
-                    const toEnqueue = jobLinks.slice(0, Math.max(0, remaining));
-                    if (toEnqueue.length) {
-                        crawlerLog.info(
-                            `Enqueuing ${toEnqueue.length} DETAIL URLs from page ${pageNo}`,
-                        );
-                        await enqueueLinks({
-                            urls: toEnqueue,
-                            userData: { label: 'DETAIL' },
-                        });
-                    }
-                } else if (jobLinks.length) {
-                    // Fast mode: just store URLs from LIST page
-                    const remaining = RESULTS_WANTED - saved;
-                    const toPush = jobLinks.slice(0, Math.max(0, remaining));
-                    for (const url of toPush) {
-                        await pushJob({ url, _source: 'html-list' });
-                    }
-                }
-
-                if (saved < RESULTS_WANTED && pageNo < MAX_PAGES) {
-                    const nextUrl = buildSearchUrl(pageNo + 1);
-                    await enqueueLinks({
-                        urls: [nextUrl],
-                        userData: { label: 'LIST', pageNo: pageNo + 1 },
-                    });
-                }
+            if (!nextJsonText) {
+                crawlerLog.warning(
+                    `No __NEXT_DATA__-style script found on page ${pageNo}. HTML snippet:\n` +
+                        $.html().slice(0, 1500),
+                );
                 return;
             }
 
-            if (label === 'DETAIL') {
-                if (saved >= RESULTS_WANTED) return;
-                try {
-                    const json = extractFromJsonLd($) || {};
-                    const desc = $(
-                        '[data-testid="job-description"], .job-description, [class*="description"]',
-                    ).first();
-                    const contractType = $(
-                        '[data-testid="contract-type"], [class*="contract"]',
-                    )
-                        .first()
-                        .text()
-                        .trim() || null;
-                    const remoteInfo = $(
-                        '[data-testid="remote-info"], [class*="remote"]',
-                    )
-                        .first()
-                        .text()
-                        .trim() || null;
+            let parsed;
+            try {
+                parsed = JSON.parse(nextJsonText);
+            } catch (err) {
+                crawlerLog.error(`Failed to parse __NEXT_DATA__ JSON on page ${pageNo}: ${err.message}`);
+                return;
+            }
 
-                    const item = {
-                        title:
-                            json.title ||
-                            $('h1').first().text().trim() ||
-                            $('[data-testid="job-title"], [class*="job-title"]')
-                                .first()
-                                .text()
-                                .trim() ||
-                            null,
-                        company:
-                            json.company ||
-                            $('[data-testid="company-name"], [class*="company-name"]')
-                                .first()
-                                .text()
-                                .trim() ||
-                            null,
-                        location:
-                            json.location ||
-                            $('[data-testid="job-location"], [class*="location"]')
-                                .first()
-                                .text()
-                                .trim() ||
-                            null,
-                        contract_type: normalizeContract(contractType),
-                        remote: normalizeRemote(remoteInfo),
-                        salary: json.salary || null,
-                        date_posted: json.date_posted || null,
-                        description_html:
-                            json.description_html ||
-                            (desc.length ? String(desc.html()).trim() : null),
-                        description_text: json.description_html
-                            ? cleanText(json.description_html)
-                            : desc.length
-                            ? cleanText(desc.html())
-                            : null,
-                        url: request.url,
-                        job_id: json.job_id || null,
-                        _source: 'html-detail',
-                    };
+            const candidateJobs = extractJobsFromNextData(parsed);
+            crawlerLog.info(
+                `extractJobsFromNextData() found ${candidateJobs.length} candidate jobs on page ${pageNo}`,
+            );
 
-                    const stored = await pushJob(item);
-                    if (stored) {
-                        crawlerLog.info(
-                            `Saved job ${saved}/${RESULTS_WANTED}: ${
-                                item.title || 'Untitled'
-                            }`,
-                        );
-                    }
-                } catch (err) {
-                    crawlerLog.error(
-                        `DETAIL ${request.url} failed: ${err.message}`,
+            if (!candidateJobs.length) {
+                crawlerLog.warning(
+                    `No candidate jobs discovered in Next.js data on page ${pageNo}. JSON excerpt: ` +
+                        nextJsonText.slice(0, 800),
+                );
+            }
+
+            const remaining = RESULTS_WANTED - saved;
+            if (remaining <= 0) {
+                crawlerLog.info(
+                    `Already reached requested RESULTS_WANTED=${RESULTS_WANTED}, skipping further extraction.`,
+                );
+                return;
+            }
+
+            for (const job of candidateJobs.slice(0, Math.max(0, remaining))) {
+                if (saved >= RESULTS_WANTED) break;
+
+                const url =
+                    (job.slug && job.organization_slug
+                        ? toAbs(`/en/companies/${job.organization_slug}/jobs/${job.slug}`)
+                        : job.url && toAbs(job.url)) || null;
+
+                const item = {
+                    title: job.name || job.title || null,
+                    company:
+                        job.organization_name ||
+                        job.company ||
+                        job.organization?.name ||
+                        null,
+                    company_slug:
+                        job.organization_slug || job.organization?.slug || null,
+                    location:
+                        job.office?.name ||
+                        (Array.isArray(job.offices)
+                            ? job.offices
+                                  .map((o) => o.name)
+                                  .filter(Boolean)
+                                  .join(', ')
+                            : null) ||
+                        job.location ||
+                        null,
+                    country:
+                        job.office?.country_name ||
+                        (Array.isArray(job.offices)
+                            ? job.offices
+                                  .map((o) => o.country_name)
+                                  .filter(Boolean)[0]
+                            : null) ||
+                        null,
+                    contract_type: normalizeContract(job.contract_type),
+                    remote: normalizeRemote(job.remote),
+                    salary: job.salary || null,
+                    date_posted: job.published_at || job.date_posted || null,
+                    description_text: job.description ? cleanText(job.description) : null,
+                    url,
+                    job_id: job.objectID || job.id || null,
+                    _source: 'next-list',
+                    _page: pageNo,
+                };
+
+                const stored = await pushJob(item);
+                if (stored) {
+                    crawlerLog.info(
+                        `Saved job ${saved}/${RESULTS_WANTED} from LIST page ${pageNo}: ${
+                            item.title || 'Untitled'
+                        }`,
+                    );
+                } else {
+                    crawlerLog.debug(
+                        `Skipped duplicate job on LIST page ${pageNo}: ${item.url || item.job_id}`,
                     );
                 }
+            }
+
+            // 2) Enqueue next LIST page if we still want more
+            if (saved < RESULTS_WANTED && pageNo < MAX_PAGES) {
+                const nextUrl = buildSearchUrl(pageNo + 1);
+                crawlerLog.info(
+                    `Enqueuing next LIST page ${pageNo + 1} (${nextUrl}) - current saved=${saved}`,
+                );
+                await enqueueLinks({
+                    urls: [nextUrl],
+                    userData: { label: 'LIST', pageNo: pageNo + 1 },
+                });
+            } else {
+                crawlerLog.info(
+                    `Stopping pagination. saved=${saved}, pageNo=${pageNo}, MAX_PAGES=${MAX_PAGES}`,
+                );
             }
         },
     });
 
-    if (saved < RESULTS_WANTED) {
-        log.info('Starting HTML fallback');
-        const startUrl = buildSearchUrl(1);
-        await crawler.run([{ url: startUrl, userData: { label: 'LIST', pageNo: 1 } }]);
-    }
+    const startUrl = buildSearchUrl(1);
+    log.info(`Starting CheerioCrawler on: ${startUrl}`);
+
+    await crawler.run([{ url: startUrl, userData: { label: 'LIST', pageNo: 1 } }]);
 
     if (saved === 0) {
         throw new Error(
@@ -626,18 +302,17 @@ Actor.main(async () => {
                 `Inputs={keyword:"${keyword}", location:"${location}", contract_type:${JSON.stringify(
                     contract_type,
                 )}, remote:${JSON.stringify(remote)}}. ` +
-                `Mode=${useAlgoliaAPI ? 'algolia+html' : 'html'} — check filters or potential blocking (403/429).`,
+                `Mode=next-json-html — either the embedded Next.js data format changed, ` +
+                `or the site is blocking the actor / serving different HTML to bots.`,
         );
     }
 
     await Actor.pushData({
         _summary: true,
         saved,
-        mode: useAlgoliaAPI ? 'algolia+html' : 'html',
+        mode: 'next-json-html',
         keyword,
         location,
-        usedAlgolia: useAlgoliaAPI,
-        usedHtmlFallback: saved > 0,
     });
 
     log.info(`Finished. Saved ${saved} jobs`);
