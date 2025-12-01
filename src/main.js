@@ -44,6 +44,29 @@ function extractFromJsonLd($) {
     return null;
 }
 
+const extractJobsFromNextData = (raw) => {
+    const jobs = [];
+    const queue = [raw];
+    const seen = new Set();
+    while (queue.length) {
+        const cur = queue.shift();
+        if (!cur || typeof cur !== 'object') continue;
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        if (Array.isArray(cur)) {
+            for (const e of cur) queue.push(e);
+            continue;
+        }
+        // Heuristic: object with slug and organization_slug is likely a job entry
+        const keys = Object.keys(cur);
+        const hasSlug = 'slug' in cur;
+        const hasOrg = 'organization_slug' in cur || 'organization' in cur;
+        if (hasSlug && hasOrg) jobs.push(cur);
+        for (const k of keys) queue.push(cur[k]);
+    }
+    return jobs;
+};
+
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
@@ -292,6 +315,40 @@ await Actor.main(async () => {
                     }
                 });
                 crawlerLog.info(`Found ${jobLinks.length} job links on page ${pageNo}`);
+
+                // If no links found, attempt to parse embedded Next.js data for jobs
+                if (jobLinks.length === 0) {
+                    const nextDataScript = $('script#__NEXT_DATA__').first().html() || $('script[id="__NEXT_DATA__"]').first().html();
+                    if (nextDataScript) {
+                        try {
+                            const parsed = JSON.parse(nextDataScript);
+                            const candidateJobs = extractJobsFromNextData(parsed);
+                            crawlerLog.info(`Next data heuristic found ${candidateJobs.length} job candidates on page ${pageNo}`);
+                            const remaining = RESULTS_WANTED - saved;
+                            for (const job of candidateJobs.slice(0, Math.max(0, remaining))) {
+                                const url = job.slug && job.organization_slug ? toAbs(`/en/companies/${job.organization_slug}/jobs/${job.slug}`) : null;
+                                const item = {
+                                    title: job.name || job.title || null,
+                                    company: job.organization_name || job.company || job.organization?.name || null,
+                                    company_slug: job.organization_slug || job.organization?.slug || null,
+                                    location: job.office?.name || job.offices?.map((o) => o.name).filter(Boolean).join(', ') || job.location || null,
+                                    country: job.office?.country_name || job.offices?.map((o) => o.country_name).filter(Boolean)[0] || null,
+                                    contract_type: normalizeContract(job.contract_type),
+                                    remote: normalizeRemote(job.remote),
+                                    salary: job.salary || null,
+                                    date_posted: job.published_at || job.date_posted || null,
+                                    description_text: job.description ? cleanText(job.description) : null,
+                                    url,
+                                    job_id: job.objectID || job.id || null,
+                                    _source: 'next-data',
+                                };
+                                await pushJob(item);
+                            }
+                        } catch (err) {
+                            crawlerLog.warning(`Failed to parse __NEXT_DATA__: ${err.message}`);
+                        }
+                    }
+                }
 
                 if (collectDetails && jobLinks.length) {
                     const remaining = RESULTS_WANTED - saved;
