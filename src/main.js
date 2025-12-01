@@ -83,8 +83,6 @@ await Actor.main(async () => {
         if (location && location.trim()) facets.push([`offices.country_code:${location.toUpperCase()}`]);
         if (Array.isArray(contract_type) && contract_type.length) facets.push(contract_type.map((ct) => `contract_type:${ct}`));
         if (Array.isArray(remote) && remote.length) facets.push(remote.map((r) => `remote:${r}`));
-        // Keep only active/published jobs
-        facets.push(['archived:false']);
         return facets;
     };
 
@@ -130,6 +128,7 @@ await Actor.main(async () => {
             'X-Algolia-Agent': 'Algolia for JavaScript (4.x); Apify Actor',
             'Content-Type': 'application/json',
             'User-Agent': pickUA(),
+            'Accept-Language': 'en-US,en;q=0.9',
             Referer: 'https://www.welcometothejungle.com/',
         };
 
@@ -149,7 +148,8 @@ await Actor.main(async () => {
         log.info(`Algolia status ${response.statusCode} page ${page} hits ${(response.body?.results?.[0]?.hits || []).length}`);
 
         if (response.statusCode !== 200) {
-            throw new Error(`Algolia API returned ${response.statusCode} ${response.statusMessage || ''}`);
+            const message = response.body?.message || response.body?.error || '';
+            throw new Error(`Algolia API returned ${response.statusCode} ${response.statusMessage || ''} ${message}`);
         }
 
         const result = response.body?.results?.[0];
@@ -210,8 +210,9 @@ await Actor.main(async () => {
             while (saved < RESULTS_WANTED && currentPage < MAX_PAGES && hasMore) {
                 const result = await searchAlgoliaJobs(keyword, currentPage);
                 const hits = result.hits || [];
+                log.info(`Algolia page ${currentPage} returned ${hits.length} hits (nbHits ${result.nbHits ?? 'n/a'})`);
                 if (!hits.length) {
-                    log.warning(`Algolia returned 0 hits at page ${currentPage}`);
+                    log.warning(`Algolia returned 0 hits at page ${currentPage}; facetFilters=${JSON.stringify(buildFacetFilters())}`);
                     hasMore = false;
                     break;
                 }
@@ -265,6 +266,17 @@ await Actor.main(async () => {
         useSessionPool: true,
         maxConcurrency: 4,
         requestHandlerTimeoutSecs: 90,
+        preNavigationHooks: [
+            async ({ request, session }) => {
+                request.headers = {
+                    ...(request.headers || {}),
+                    'User-Agent': pickUA(),
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    Referer: 'https://www.welcometothejungle.com/',
+                };
+                if (session?.id) request.headers['X-Session-Id'] = session.id;
+            },
+        ],
         async requestHandler({ request, $, enqueueLinks, log: crawlerLog }) {
             const label = request.userData?.label || 'LIST';
             const pageNo = request.userData?.pageNo || 1;
@@ -279,6 +291,7 @@ await Actor.main(async () => {
                         if (fullUrl && !jobLinks.includes(fullUrl)) jobLinks.push(fullUrl);
                     }
                 });
+                crawlerLog.info(`Found ${jobLinks.length} job links on page ${pageNo}`);
 
                 if (collectDetails && jobLinks.length) {
                     const remaining = RESULTS_WANTED - saved;
