@@ -1,0 +1,14 @@
+{
+  "keyword": "software engineer",
+  "location": "US",
+  "contract_type": ["full_time", "internship"],
+  "remote": ["fulltime", "partial"],
+  "results_wanted": 50,
+  "max_pages": 5,
+  "collectDetails": true,
+  "useAlgoliaAPI": true,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
+}

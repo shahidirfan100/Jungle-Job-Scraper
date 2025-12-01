@@ -1,0 +1,63 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "title",
+          "company",
+          "location",
+          "country",
+          "contract_type",
+          "remote",
+          "salary",
+          "date_posted",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "title": {
+            "label": "Job Title",
+            "format": "text"
+          },
+          "company": {
+            "label": "Company",
+            "format": "text"
+          },
+          "location": {
+            "label": "Location",
+            "format": "text"
+          },
+          "country": {
+            "label": "Country",
+            "format": "text"
+          },
+          "contract_type": {
+            "label": "Contract Type",
+            "format": "text"
+          },
+          "remote": {
+            "label": "Remote",
+            "format": "text"
+          },
+          "salary": {
+            "label": "Salary",
+            "format": "text"
+          },
+          "date_posted": {
+            "label": "Posted Date",
+            "format": "text"
+          },
+          "url": {
+            "label": "Job URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}

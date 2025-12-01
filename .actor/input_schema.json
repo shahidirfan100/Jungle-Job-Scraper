@@ -1,0 +1,80 @@
+{
+  "title": "Welcome to the Jungle Jobs Scraper",
+  "description": "Extract job listings from Welcome to the Jungle using Algolia API (fast) or HTML parsing (fallback). Filter by keyword, location, contract type, and remote work options.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "keyword": {
+      "title": "Search Keyword",
+      "type": "string",
+      "description": "Job title, skill, or keyword to search for (e.g., 'Software Engineer', 'Marketing Manager', 'Data Analyst', 'Frontend Developer').",
+      "editor": "textfield",
+      "prefill": "software engineer"
+    },
+    "location": {
+      "title": "Country Code",
+      "type": "string",
+      "description": "Two-letter country code to filter jobs (e.g., 'US', 'GB', 'FR', 'DE'). Leave empty for worldwide results.",
+      "editor": "textfield",
+      "prefill": "US"
+    },
+    "contract_type": {
+      "title": "Contract Type",
+      "type": "array",
+      "description": "Filter by employment contract types.",
+      "editor": "stringList",
+      "items": {
+        "type": "string",
+        "enum": ["full_time", "part_time", "internship", "apprenticeship", "freelance", "fixed_term"]
+      },
+      "default": []
+    },
+    "remote": {
+      "title": "Remote Work Options",
+      "type": "array",
+      "description": "Filter by remote work flexibility.",
+      "editor": "stringList",
+      "items": {
+        "type": "string",
+        "enum": ["fulltime", "partial", "punctual", "no"]
+      },
+      "default": []
+    },
+    "collectDetails": {
+      "title": "Collect Full Job Details",
+      "type": "boolean",
+      "description": "Visit each job page to extract complete descriptions and additional metadata. Recommended for comprehensive data.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "results_wanted": {
+      "title": "Maximum Results",
+      "type": "integer",
+      "description": "Maximum number of job listings to extract. Set a higher value to collect more jobs.",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 100,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Safety limit on search result pages to process (prevents infinite loops).",
+      "minimum": 1,
+      "maximum": 100,
+      "editor": "number",
+      "default": 20
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Configure proxy settings for reliable scraping. Residential proxies recommended for best results.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
+  },
+  "required": []
+}
