@@ -3,7 +3,6 @@ import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
 import { gotScraping } from 'got-scraping';
-import HeaderGenerator from 'header-generator';
 
 // Shared helpers
 const toAbs = (href, base = 'https://www.welcometothejungle.com') => {
@@ -45,11 +44,12 @@ function extractFromJsonLd($) {
     return null;
 }
 
-const headerGenerator = new HeaderGenerator({
-    browsers: ['chrome', 'firefox'],
-    operatingSystems: ['windows', 'macos'],
-    devices: ['desktop'],
-});
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:118.0) Gecko/20100101 Firefox/118.0',
+];
+const pickUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
@@ -124,13 +124,12 @@ await Actor.main(async () => {
     };
 
     async function searchAlgoliaJobs(query, page = 0) {
-        const generatedHeaders = headerGenerator.getHeaders();
         const headers = {
             'X-Algolia-Application-Id': ALGOLIA_APP_ID,
             'X-Algolia-API-Key': ALGOLIA_API_KEY,
             'X-Algolia-Agent': 'Algolia for JavaScript (4.x); Apify Actor',
             'Content-Type': 'application/json',
-            'User-Agent': generatedHeaders['user-agent'],
+            'User-Agent': pickUA(),
             Referer: 'https://www.welcometothejungle.com/',
         };
 
@@ -177,7 +176,7 @@ await Actor.main(async () => {
             const response = await gotScraping({
                 url: jobData.url,
                 proxyUrl: proxyConf ? await proxyConf.newUrl() : undefined,
-                headers: headerGenerator.getHeaders(),
+                headers: { 'User-Agent': pickUA() },
             });
             const $detail = cheerioLoad(response.body);
             const jsonLd = extractFromJsonLd($detail);
