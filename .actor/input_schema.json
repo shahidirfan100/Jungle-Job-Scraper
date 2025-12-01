@@ -74,6 +74,19 @@
         "useApifyProxy": true,
         "apifyProxyGroups": ["RESIDENTIAL"]
       }
+    },
+    "useAlgoliaAPI": {
+      "title": "Use Algolia API (fast)",
+      "type": "boolean",
+      "description": "Use the Algolia API for high-speed extraction. Disable to force pure HTML crawling.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "algoliaApiKey": {
+      "title": "Algolia API Key (optional override)",
+      "type": "string",
+      "description": "Optional override for the Algolia API key. Leave empty to use the built-in default.",
+      "editor": "textfield"
     }
   },
   "required": []

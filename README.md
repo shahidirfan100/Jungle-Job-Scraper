@@ -7,7 +7,7 @@ Extract comprehensive job listings from Welcome to the Jungle with advanced filt
 This scraper automates job data collection from Welcome to the Jungle, one of Europe's leading job platforms. It efficiently extracts job postings with complete details including title, company, location, remote work options, contract type, salary information, and full descriptions.
 
 **Key capabilities:**
-- **Dual extraction methods**: Fast Algolia API queries or comprehensive HTML parsing
+- **Dual extraction methods**: Fast Algolia API queries or comprehensive HTML parsing (automatically falls back if API is blocked or empty)
 - **Advanced filtering**: Search by keyword, location, contract type, and remote work preferences
 - **Complete job details**: Extract descriptions, requirements, benefits, and metadata
 - **Smart pagination**: Automatically handles multiple pages of search results
@@ -45,14 +45,17 @@ The scraper is optimized for efficiency and cost-effectiveness. Costs depend on 
 | `remote` | Array | No | Remote work options: fulltime, partial, punctual, no |
 | `results_wanted` | Integer | No | Maximum jobs to extract (default: 100, max: 1000) |
 | `max_pages` | Integer | No | Page limit for safety (default: 20, max: 100) |
+| `useAlgoliaAPI` | Boolean | No | Use fast Algolia API (default: true). Disable to force HTML-only crawling |
+| `algoliaApiKey` | String | No | Optional Algolia API key override (leave empty to use built-in) |
 
 ### Advanced Settings
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `useAlgoliaAPI` | Boolean | No | Enable fast API extraction (default: true, recommended) |
+| `useAlgoliaAPI` | Boolean | No | Enable fast API extraction (default: true, recommended; falls back to HTML on failures) |
 | `collectDetails` | Boolean | No | Visit job pages for full descriptions (default: true) |
 | `proxyConfiguration` | Object | No | Proxy settings - residential proxies recommended |
+| `algoliaApiKey` | String | No | Optional override if you prefer to supply your own key |
 
 ### Example Input
 
@@ -66,6 +69,7 @@ The scraper is optimized for efficiency and cost-effectiveness. Costs depend on 
   "max_pages": 10,
   "useAlgoliaAPI": true,
   "collectDetails": true,
+  "algoliaApiKey": "",
   "proxyConfiguration": {
     "useApifyProxy": true,
     "apifyProxyGroups": ["RESIDENTIAL"]
@@ -171,9 +175,9 @@ Configure schedules in your Apify account under "Schedules."
 ## Best Practices
 
 ### Optimize Performance
-- Use **Algolia API mode** for speed (10x faster than HTML parsing)
+- Use **Algolia API mode** for speed (10x faster than HTML parsing); HTML fallback will engage automatically if blocked
 - Enable **collectDetails** only when full descriptions are needed
-- Set reasonable **results_wanted** limits to control costs
+- Set reasonable **results_wanted** limits to control costs and runtime
 
 ### Improve Data Quality
 - Use **specific keywords** for targeted results
