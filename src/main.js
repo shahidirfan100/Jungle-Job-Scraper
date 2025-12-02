@@ -367,9 +367,16 @@ await Actor.main(async () => {
     const runAlgoliaMode = async () => {
         let page = 0;
         let totalPages = 1;
+        log.info(`Algolia mode: index=${buildAlgoliaIndexName()}, filters="${buildAlgoliaFilters()}"`);
 
         while (page < totalPages && saved < RESULTS_WANTED) {
-            const res = await fetchAlgoliaPage({ page });
+            let res;
+            try {
+                res = await fetchAlgoliaPage({ page });
+            } catch (err) {
+                log.warning(`Algolia request failed on page ${page}: ${err.message}`);
+                break;
+            }
             const hits = Array.isArray(res.hits) ? res.hits : [];
             totalPages = Number.isFinite(res.nbPages) ? res.nbPages : totalPages;
 
@@ -393,6 +400,31 @@ await Actor.main(async () => {
         }
 
         return saved;
+    };
+
+    const extractInlineHits = (html) => {
+        if (!html) return [];
+        // Look for JSON blocks containing "hits":[...]
+        const hitMatches = [];
+        const regex = /\"hits\"\s*:\s*\[(.*?)\]/gs;
+        let m;
+        while ((m = regex.exec(html)) !== null) {
+            hitMatches.push(m[0]);
+            if (hitMatches.length > 2) break;
+        }
+        const hits = [];
+        for (const block of hitMatches) {
+            try {
+                // Wrap into object to parse.
+                const obj = JSON.parse(`{${block}}`);
+                if (Array.isArray(obj.hits)) {
+                    hits.push(...obj.hits);
+                }
+            } catch {
+                // ignore parse errors
+            }
+        }
+        return hits;
     };
 
     const crawler = new CheerioCrawler({
@@ -460,10 +492,29 @@ await Actor.main(async () => {
                 );
 
                 if (!jobAnchors.length) {
-                    crawlerLog.warning(
-                        `No job anchors detected on page ${pageNo}. HTML snippet:\n` +
-                            $.html().slice(0, 1200),
-                    );
+                    const inlineHits = extractInlineHits($.html());
+                    if (inlineHits.length) {
+                        crawlerLog.info(
+                            `No anchors, but found ${inlineHits.length} inline hits on page ${pageNo} - pushing directly.`,
+                        );
+                        for (const hit of inlineHits) {
+                            if (saved >= RESULTS_WANTED) break;
+                            const job = { ...hitToJob(hit, pageNo), _source: 'inline-json' };
+                            const stored = await pushJob(job);
+                            if (stored) {
+                                crawlerLog.info(
+                                    `Saved job ${saved}/${RESULTS_WANTED} from inline JSON: ${
+                                        job.title || job.url
+                                    }`,
+                                );
+                            }
+                        }
+                    } else {
+                        crawlerLog.warning(
+                            `No job anchors detected on page ${pageNo} and no inline hits. HTML snippet:\n` +
+                                $.html().slice(0, 800),
+                        );
+                    }
                 } else {
                     crawlerLog.debug(
                         `Sample job anchors on page ${pageNo}: ${jobAnchors
@@ -597,7 +648,7 @@ await Actor.main(async () => {
     await Actor.pushData({
         _summary: true,
         saved,
-        mode: 'html-detail',
+        mode,
         keyword,
         location,
     });
