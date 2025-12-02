@@ -4,6 +4,7 @@
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
+import { gotScraping } from 'got-scraping';
 
 // ---------- Helpers ----------
 
@@ -166,7 +167,7 @@ await Actor.main(async () => {
 
     const {
         keyword = '',
-        // ISO country code (e.g. "FR", "US") – can be blank.
+        // ISO country code (e.g. "FR", "US") - can be blank.
         location = '',
         contract_type = [],
         remote = [],
@@ -174,6 +175,8 @@ await Actor.main(async () => {
         max_pages: MAX_PAGES_RAW = 10,
         proxyConfiguration,
         maxConcurrency = 4,
+        mode = 'auto', // 'auto' | 'api' | 'html'
+        language = 'en',
     } = input;
 
     log.info('Actor input', {
@@ -184,6 +187,8 @@ await Actor.main(async () => {
         RESULTS_WANTED_RAW,
         MAX_PAGES_RAW,
         maxConcurrency,
+        mode,
+        language,
     });
 
     const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW)
@@ -203,6 +208,91 @@ await Actor.main(async () => {
     const proxyConf = proxyConfiguration
         ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
         : undefined;
+
+    const ALGOLIA_APP_ID = 'CSEKHVMS53';
+    const ALGOLIA_API_KEY = '4bd8f6215d0cc52b26430765769e65a0';
+    const ALGOLIA_INDEX_PREFIX = 'wttj_jobs_production';
+
+    const buildAlgoliaIndexName = () => `${ALGOLIA_INDEX_PREFIX}_${(language || 'en').trim()}`;
+
+    const buildAlgoliaFilters = () => {
+        const filters = [];
+        if (location) filters.push(`offices.country_code:"${location.toUpperCase()}"`);
+
+        if (Array.isArray(contract_type) && contract_type.length) {
+            const ors = contract_type
+                .filter(Boolean)
+                .map((ct) => `contract_type:"${ct.toLowerCase()}"`);
+            if (ors.length) filters.push(`(${ors.join(' OR ')})`);
+        }
+
+        if (Array.isArray(remote) && remote.length) {
+            const ors = remote
+                .filter(Boolean)
+                .map((r) => `remote:"${r.toLowerCase()}"`);
+            if (ors.length) filters.push(`(${ors.join(' OR ')})`);
+        }
+
+        return filters.join(' AND ');
+    };
+
+    const fetchAlgoliaPage = async ({ page }) => {
+        const body = {
+            params: new URLSearchParams({
+                query: keyword,
+                hitsPerPage: '30',
+                page: String(page),
+                clickAnalytics: 'false',
+                maxValuesPerFacet: '99',
+                attributesToRetrieve: [
+                    '*',
+                    '-has_benefits',
+                    '-has_contract_duration',
+                    '-has_education_level',
+                    '-has_experience_level_minimum',
+                    '-has_remote',
+                    '-has_salary_yearly_minimum',
+                    '-organization.description',
+                    '-organization_score',
+                    '-profile',
+                    '-rank_group_1',
+                    '-rank_group_2',
+                    '-rank_group_3',
+                    '-source_stage',
+                ].join(','),
+                facets: ['*'].join(','),
+            }).toString(),
+        };
+
+        const filters = buildAlgoliaFilters();
+        if (filters) {
+            body.params += `&filters=${encodeURIComponent(filters)}`;
+        }
+
+        const indexName = buildAlgoliaIndexName();
+        const url = `https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/${indexName}/query`;
+
+        const res = await gotScraping({
+            url,
+            method: 'POST',
+            proxyUrl: proxyConf ? proxyConf.newUrl() : undefined,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Algolia-Application-Id': ALGOLIA_APP_ID,
+                'X-Algolia-API-Key': ALGOLIA_API_KEY,
+                Origin: 'https://www.welcometothejungle.com',
+                Referer: 'https://www.welcometothejungle.com/en/jobs',
+                'User-Agent': pickUA(),
+            },
+            body: JSON.stringify(body),
+            responseType: 'json',
+        });
+
+        if (!res.body || typeof res.body !== 'object') {
+            throw new Error(`Algolia response invalid for page ${page}`);
+        }
+        return res.body;
+    };
 
     const seenIds = new Set();
     const seenUrls = new Set();
@@ -237,6 +327,72 @@ await Actor.main(async () => {
         }
         u.searchParams.set('page', String(page));
         return u.href;
+    };
+
+    const hitToJob = (hit, page) => {
+        const orgSlug = hit?.organization?.slug;
+        const jobSlug = hit?.slug;
+        const lang = (hit?.language || language || 'en').slice(0, 5);
+        const url =
+            orgSlug && jobSlug
+                ? `https://www.welcometothejungle.com/${lang}/companies/${orgSlug}/jobs/${jobSlug}`
+                : null;
+        const locationObj = Array.isArray(hit?.offices) ? hit.offices[0] : null;
+
+        return {
+            job_id: hit.objectID || hit.reference || hit.slug || toSlugId(url),
+            title: hit.name || null,
+            company: hit.organization?.name || null,
+            location:
+                locationObj?.city ||
+                locationObj?.country ||
+                locationObj?.state ||
+                locationObj?.country_code ||
+                null,
+            contract_type: normalizeContract(hit.contract_type) || null,
+            remote: normalizeRemote(hit.remote) || null,
+            description_text: cleanText(hit.summary || ''),
+            description_html: null,
+            published_at: hit.published_at || hit.published_at_date || null,
+            salary_min: hit.salary_minimum || hit.salary_yearly_minimum || null,
+            salary_max: hit.salary_maximum || null,
+            salary_currency: hit.salary_currency || null,
+            url,
+            _source: 'api',
+            _page: page,
+            _fetched_at: new Date().toISOString(),
+        };
+    };
+
+    const runAlgoliaMode = async () => {
+        let page = 0;
+        let totalPages = 1;
+
+        while (page < totalPages && saved < RESULTS_WANTED) {
+            const res = await fetchAlgoliaPage({ page });
+            const hits = Array.isArray(res.hits) ? res.hits : [];
+            totalPages = Number.isFinite(res.nbPages) ? res.nbPages : totalPages;
+
+            if (!hits.length) {
+                log.warning(`Algolia page ${page} returned 0 hits`);
+                break;
+            }
+
+            for (const hit of hits) {
+                if (saved >= RESULTS_WANTED) break;
+                const job = hitToJob(hit, page + 1);
+                const stored = await pushJob(job);
+                if (stored) {
+                    log.info(
+                        `Saved job ${saved}/${RESULTS_WANTED} from API: ${job.title || job.url}`,
+                    );
+                }
+            }
+
+            page += 1;
+        }
+
+        return saved;
     };
 
     const crawler = new CheerioCrawler({
@@ -410,9 +566,21 @@ await Actor.main(async () => {
     });
 
     const startUrl = buildSearchUrl(1);
-    log.info(`Starting CheerioCrawler on: ${startUrl}`);
+    log.info(`Starting actor with mode=${mode}. First URL: ${startUrl}`);
 
-    await crawler.run([{ url: startUrl, userData: { label: 'LIST', pageNo: 1 } }]);
+    let apiSaved = 0;
+    if (mode === 'auto' || mode === 'api') {
+        try {
+            apiSaved = await runAlgoliaMode();
+            log.info(`API branch saved ${apiSaved} items`);
+        } catch (err) {
+            log.warning(`API branch failed: ${err.message}`);
+        }
+    }
+
+    if ((mode === 'auto' && apiSaved < RESULTS_WANTED) || mode === 'html') {
+        await crawler.run([{ url: startUrl, userData: { label: 'LIST', pageNo: 1 } }]);
+    }
 
     if (saved === 0) {
         // Keep this guard to tell you clearly when nothing was scraped.
@@ -421,8 +589,8 @@ await Actor.main(async () => {
                 `Inputs={keyword:"${keyword}", location:"${location}", contract_type:${JSON.stringify(
                     contract_type,
                 )}, remote:${JSON.stringify(remote)}}. ` +
-                `Mode=anchor-html — likely the anchor pattern for job links changed, ` +
-                `or the site is serving different HTML to the actor.`,
+                `Mode=${mode} - API and HTML branches both returned 0. Check API filters, ` +
+                `or update HTML selectors / allowlist.`,
         );
     }
 
