@@ -1,5 +1,5 @@
 // main.js
-// Welcome to the Jungle jobs scraper - pure HTTP + HTML anchors (no Playwright, no Algolia, no __NEXT_DATA__).
+// Welcome to the Jungle jobs scraper - using __INITIAL_DATA__ JSON extraction + HTML fallback
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -21,7 +21,6 @@ const toSlugId = (url) => {
         const u = new URL(url);
         const parts = u.pathname.split('/').filter(Boolean);
         const last = parts[parts.length - 1] || '';
-        // Expect a trailing slug like "job-title-12345" or UUID-ish id.
         const match =
             last.match(/([a-f0-9]{8,})$/i)?.[1] ||
             last.match(/(\d{4,})$/)?.[1] ||
@@ -35,10 +34,9 @@ const toSlugId = (url) => {
 
 const cleanText = (htmlOrText) => {
     if (!htmlOrText) return '';
-    // If it's HTML, strip tags; if it's text, cheerio will just wrap it.
     const $ = cheerioLoad(String(htmlOrText));
     $('script, style, noscript, iframe').remove();
-    return $.root().text().replace(/\s+/g, ' ').trim();
+    return $.root().text().replace(/\\s+/g, ' ').trim();
 };
 
 const USER_AGENTS = [
@@ -48,11 +46,106 @@ const USER_AGENTS = [
 ];
 const pickUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-// You might extend these later, but for now keep them very simple:
 const normalizeContract = (val) =>
     typeof val === 'string' && val.trim() ? val.trim().toLowerCase() : null;
 const normalizeRemote = (val) =>
     typeof val === 'string' && val.trim() ? val.trim().toLowerCase() : null;
+
+// ---------- JSON Data Extraction from __INITIAL_DATA__ ----------
+
+const extractInitialData = (html) => {
+    if (!html) return null;
+
+    // Look for window.__INITIAL_DATA__ = "..." pattern
+    const initialDataMatch = html.match(/window\.__INITIAL_DATA__\s*=\s*"(.+?)"\s*(?:;|\n|<\/script>)/s);
+    if (!initialDataMatch) {
+        log.debug('No __INITIAL_DATA__ found in HTML');
+        return null;
+    }
+
+    try {
+        // The data is double-escaped JSON string
+        let jsonStr = initialDataMatch[1];
+        // Unescape the string (it's escaped with backslashes)
+        jsonStr = jsonStr.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+        const parsed = JSON.parse(jsonStr);
+        return parsed;
+    } catch (err) {
+        log.warning(`Failed to parse __INITIAL_DATA__: ${err.message}`);
+        return null;
+    }
+};
+
+const extractJobsFromInitialData = (initialData, language = 'en') => {
+    if (!initialData || !initialData.queries) return [];
+
+    const jobs = [];
+
+    for (const query of initialData.queries) {
+        const state = query?.state;
+        if (!state || !state.data) continue;
+
+        // Check if this is a job hits query
+        const data = state.data;
+
+        // Handle direct hits array
+        if (data.hits && Array.isArray(data.hits)) {
+            jobs.push(...data.hits);
+        }
+
+        // Handle nested data structures
+        if (Array.isArray(data)) {
+            for (const item of data) {
+                if (item?.properties?.algolia_query) {
+                    // This might trigger Algolia results, skip for now
+                    continue;
+                }
+            }
+        }
+    }
+
+    return jobs;
+};
+
+// ---------- Job Parsing ----------
+
+const hitToJob = (hit, page, language = 'en') => {
+    const orgSlug = hit?.organization?.slug;
+    const jobSlug = hit?.slug;
+    const lang = (hit?.language || language || 'en').slice(0, 5);
+    const url =
+        orgSlug && jobSlug
+            ? `https://www.welcometothejungle.com/${lang}/companies/${orgSlug}/jobs/${jobSlug}`
+            : null;
+
+    const locationObj = Array.isArray(hit?.offices) ? hit.offices[0] : null;
+
+    return {
+        job_id: hit.objectID || hit.reference || hit.wk_reference || hit.slug || toSlugId(url),
+        title: hit.name || null,
+        company: hit.organization?.name || null,
+        location:
+            locationObj?.city ||
+            locationObj?.country ||
+            locationObj?.state ||
+            locationObj?.country_code ||
+            null,
+        contract_type: normalizeContract(hit.contract_type) || null,
+        remote: normalizeRemote(hit.remote) || null,
+        description_text: cleanText(hit.summary || ''),
+        description_html: null,
+        published_at: hit.published_at || hit.published_at_date || null,
+        salary_min: hit.salary_minimum || hit.salary_yearly_minimum || null,
+        salary_max: hit.salary_maximum || null,
+        salary_currency: hit.salary_currency || null,
+        sectors: hit.sectors?.map(s => s.name).join(', ') || null,
+        benefits: Array.isArray(hit.benefits) ? hit.benefits.join(', ') : null,
+        url,
+        _source: 'initial-data',
+        _page: page,
+        _fetched_at: new Date().toISOString(),
+    };
+};
 
 const parseJobFromJsonLd = ($, currentUrl) => {
     let bestNode = null;
@@ -70,7 +163,7 @@ const parseJobFromJsonLd = ($, currentUrl) => {
                     type === 'JobPosting'
                 ) {
                     bestNode = node;
-                    return false; // break out
+                    return false;
                 }
             }
         } catch {
@@ -167,7 +260,6 @@ await Actor.main(async () => {
 
     const {
         keyword = '',
-        // ISO country code (e.g. "FR", "US") - can be blank.
         location = '',
         contract_type = [],
         remote = [],
@@ -175,8 +267,9 @@ await Actor.main(async () => {
         max_pages: MAX_PAGES_RAW = 10,
         proxyConfiguration,
         maxConcurrency = 4,
-        mode = 'auto', // 'auto' | 'api' | 'html'
+        mode = 'auto', // 'auto' | 'json' | 'html'
         language = 'en',
+        collectDetails = false,
     } = input;
 
     log.info('Actor input', {
@@ -189,6 +282,7 @@ await Actor.main(async () => {
         maxConcurrency,
         mode,
         language,
+        collectDetails,
     });
 
     const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW)
@@ -201,98 +295,13 @@ await Actor.main(async () => {
     if (location && location.length > 3) {
         log.warning(
             `location="${location}" looks like a name, not an ISO country code (e.g. "FR"). ` +
-                'This may not match the site’s filters that expect country codes.',
+            'This may not match the site\'s filters that expect country codes.',
         );
     }
 
     const proxyConf = proxyConfiguration
         ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
         : undefined;
-
-    const ALGOLIA_APP_ID = 'CSEKHVMS53';
-    const ALGOLIA_API_KEY = '4bd8f6215d0cc52b26430765769e65a0';
-    const ALGOLIA_INDEX_PREFIX = 'wttj_jobs_production';
-
-    const buildAlgoliaIndexName = () => `${ALGOLIA_INDEX_PREFIX}_${(language || 'en').trim()}`;
-
-    const buildAlgoliaFilters = () => {
-        const filters = [];
-        if (location) filters.push(`offices.country_code:"${location.toUpperCase()}"`);
-
-        if (Array.isArray(contract_type) && contract_type.length) {
-            const ors = contract_type
-                .filter(Boolean)
-                .map((ct) => `contract_type:"${ct.toLowerCase()}"`);
-            if (ors.length) filters.push(`(${ors.join(' OR ')})`);
-        }
-
-        if (Array.isArray(remote) && remote.length) {
-            const ors = remote
-                .filter(Boolean)
-                .map((r) => `remote:"${r.toLowerCase()}"`);
-            if (ors.length) filters.push(`(${ors.join(' OR ')})`);
-        }
-
-        return filters.join(' AND ');
-    };
-
-    const fetchAlgoliaPage = async ({ page }) => {
-        const body = {
-            params: new URLSearchParams({
-                query: keyword,
-                hitsPerPage: '30',
-                page: String(page),
-                clickAnalytics: 'false',
-                maxValuesPerFacet: '99',
-                attributesToRetrieve: [
-                    '*',
-                    '-has_benefits',
-                    '-has_contract_duration',
-                    '-has_education_level',
-                    '-has_experience_level_minimum',
-                    '-has_remote',
-                    '-has_salary_yearly_minimum',
-                    '-organization.description',
-                    '-organization_score',
-                    '-profile',
-                    '-rank_group_1',
-                    '-rank_group_2',
-                    '-rank_group_3',
-                    '-source_stage',
-                ].join(','),
-                facets: ['*'].join(','),
-            }).toString(),
-        };
-
-        const filters = buildAlgoliaFilters();
-        if (filters) {
-            body.params += `&filters=${encodeURIComponent(filters)}`;
-        }
-
-        const indexName = buildAlgoliaIndexName();
-        const url = `https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/${indexName}/query`;
-
-        const res = await gotScraping({
-            url,
-            method: 'POST',
-            proxyUrl: proxyConf ? proxyConf.newUrl() : undefined,
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Algolia-Application-Id': ALGOLIA_APP_ID,
-                'X-Algolia-API-Key': ALGOLIA_API_KEY,
-                Origin: 'https://www.welcometothejungle.com',
-                Referer: 'https://www.welcometothejungle.com/en/jobs',
-                'User-Agent': pickUA(),
-            },
-            body: JSON.stringify(body),
-            responseType: 'json',
-        });
-
-        if (!res.body || typeof res.body !== 'object') {
-            throw new Error(`Algolia response invalid for page ${page}`);
-        }
-        return res.body;
-    };
 
     const seenIds = new Set();
     const seenUrls = new Set();
@@ -310,7 +319,7 @@ await Actor.main(async () => {
     };
 
     const buildSearchUrl = (page = 1) => {
-        const u = new URL('https://www.welcometothejungle.com/en/jobs');
+        const u = new URL(`https://www.welcometothejungle.com/${language}/jobs`);
         if (keyword) u.searchParams.set('query', keyword);
         if (location) {
             u.searchParams.set('refinementList[offices.country_code][]', location.toUpperCase());
@@ -329,103 +338,91 @@ await Actor.main(async () => {
         return u.href;
     };
 
-    const hitToJob = (hit, page) => {
-        const orgSlug = hit?.organization?.slug;
-        const jobSlug = hit?.slug;
-        const lang = (hit?.language || language || 'en').slice(0, 5);
-        const url =
-            orgSlug && jobSlug
-                ? `https://www.welcometothejungle.com/${lang}/companies/${orgSlug}/jobs/${jobSlug}`
-                : null;
-        const locationObj = Array.isArray(hit?.offices) ? hit.offices[0] : null;
+    // ---------- Fetch page and extract JSON data ----------
 
-        return {
-            job_id: hit.objectID || hit.reference || hit.slug || toSlugId(url),
-            title: hit.name || null,
-            company: hit.organization?.name || null,
-            location:
-                locationObj?.city ||
-                locationObj?.country ||
-                locationObj?.state ||
-                locationObj?.country_code ||
-                null,
-            contract_type: normalizeContract(hit.contract_type) || null,
-            remote: normalizeRemote(hit.remote) || null,
-            description_text: cleanText(hit.summary || ''),
-            description_html: null,
-            published_at: hit.published_at || hit.published_at_date || null,
-            salary_min: hit.salary_minimum || hit.salary_yearly_minimum || null,
-            salary_max: hit.salary_maximum || null,
-            salary_currency: hit.salary_currency || null,
-            url,
-            _source: 'api',
-            _page: page,
-            _fetched_at: new Date().toISOString(),
-        };
+    const fetchPageAndExtractJobs = async (pageNo) => {
+        const url = buildSearchUrl(pageNo);
+        log.info(`Fetching page ${pageNo}: ${url}`);
+
+        try {
+            const response = await gotScraping({
+                url,
+                proxyUrl: proxyConf ? proxyConf.newUrl() : undefined,
+                headers: {
+                    'User-Agent': pickUA(),
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                },
+                timeout: { request: 30000 },
+                retry: { limit: 2 },
+            });
+
+            const html = response.body;
+
+            if (!html || html.length < 1000) {
+                log.warning(`Page ${pageNo} returned very short response (${html?.length || 0} bytes)`);
+                return [];
+            }
+
+            // Extract __INITIAL_DATA__
+            const initialData = extractInitialData(html);
+            if (!initialData) {
+                log.warning(`No __INITIAL_DATA__ found on page ${pageNo}`);
+                return [];
+            }
+
+            const hits = extractJobsFromInitialData(initialData, language);
+            log.info(`Page ${pageNo}: extracted ${hits.length} job hits from __INITIAL_DATA__`);
+
+            return hits;
+        } catch (err) {
+            log.warning(`Failed to fetch page ${pageNo}: ${err.message}`);
+            return [];
+        }
     };
 
-    const runAlgoliaMode = async () => {
-        let page = 0;
-        let totalPages = 1;
-        log.info(`Algolia mode: index=${buildAlgoliaIndexName()}, filters="${buildAlgoliaFilters()}"`);
+    // ---------- Run JSON extraction mode ----------
 
-        while (page < totalPages && saved < RESULTS_WANTED) {
-            let res;
-            try {
-                res = await fetchAlgoliaPage({ page });
-            } catch (err) {
-                log.warning(`Algolia request failed on page ${page}: ${err.message}`);
-                break;
-            }
-            const hits = Array.isArray(res.hits) ? res.hits : [];
-            totalPages = Number.isFinite(res.nbPages) ? res.nbPages : totalPages;
+    const runJsonMode = async () => {
+        log.info('Running JSON extraction mode');
 
-            if (!hits.length) {
-                log.warning(`Algolia page ${page} returned 0 hits`);
+        for (let pageNo = 1; pageNo <= MAX_PAGES && saved < RESULTS_WANTED; pageNo++) {
+            const hits = await fetchPageAndExtractJobs(pageNo);
+
+            if (hits.length === 0) {
+                log.info(`No more jobs found on page ${pageNo}, stopping pagination`);
                 break;
             }
 
             for (const hit of hits) {
                 if (saved >= RESULTS_WANTED) break;
-                const job = hitToJob(hit, page + 1);
+
+                const job = hitToJob(hit, pageNo, language);
+
+                // Skip if no valid URL
+                if (!job.url) {
+                    log.debug(`Skipping job without URL: ${job.title}`);
+                    continue;
+                }
+
                 const stored = await pushJob(job);
                 if (stored) {
-                    log.info(
-                        `Saved job ${saved}/${RESULTS_WANTED} from API: ${job.title || job.url}`,
-                    );
+                    log.info(`Saved job ${saved}/${RESULTS_WANTED}: ${job.title} at ${job.company}`);
                 }
             }
 
-            page += 1;
+            // Small delay between pages to be polite
+            if (pageNo < MAX_PAGES && saved < RESULTS_WANTED) {
+                await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
+            }
         }
 
         return saved;
     };
 
-    const extractInlineHits = (html) => {
-        if (!html) return [];
-        // Look for JSON blocks containing "hits":[...]
-        const hitMatches = [];
-        const regex = /\"hits\"\s*:\s*\[(.*?)\]/gs;
-        let m;
-        while ((m = regex.exec(html)) !== null) {
-            hitMatches.push(m[0]);
-            if (hitMatches.length > 2) break;
-        }
-        const hits = [];
-        for (const block of hitMatches) {
-            try {
-                // Wrap into object to parse.
-                const obj = JSON.parse(`{${block}}`);
-                if (Array.isArray(obj.hits)) {
-                    hits.push(...obj.hits);
-                }
-            } catch {
-                // ignore parse errors
-            }
-        }
-        return hits;
-    };
+    // ---------- Cheerio Crawler for HTML fallback and detail pages ----------
 
     const crawler = new CheerioCrawler({
         proxyConfiguration: proxyConf,
@@ -449,121 +446,38 @@ await Actor.main(async () => {
             const label = request.userData?.label || 'LIST';
             const pageNo = request.userData?.pageNo || 1;
 
-            // ---------------- LIST HANDLER ----------------
+            // ---------------- LIST HANDLER (HTML fallback) ----------------
             if (label === 'LIST') {
                 crawlerLog.info(`Processing LIST page ${pageNo}: ${request.url}`);
 
-                const jobAnchors = [];
-                $('a[href]').each((_, el) => {
-                    const $el = $(el);
-                    const href = $el.attr('href') || '';
-                    const text = cleanText($el.text());
-                    const dataTestId = ($el.attr('data-testid') || '').toLowerCase();
+                // First try to extract from __INITIAL_DATA__
+                const html = $.html();
+                const initialData = extractInitialData(html);
 
-                    const isJobHref =
-                        /\/jobs?\//i.test(href) ||
-                        /\/job-/.test(href) ||
-                        /\/en\/companies\/.+\/jobs\/.+/i.test(href) ||
-                        dataTestId.includes('job-card') ||
-                        dataTestId.includes('search-card') ||
-                        dataTestId.includes('job-link');
+                if (initialData) {
+                    const hits = extractJobsFromInitialData(initialData, language);
+                    crawlerLog.info(`Found ${hits.length} jobs in __INITIAL_DATA__`);
 
-                    const isNavOrFooter =
-                        ['home', 'find a job', 'find a company', 'media'].includes(
-                            text.toLowerCase(),
-                        ) ||
-                        text.toLowerCase().includes('help center') ||
-                        text.toLowerCase().includes('about us') ||
-                        text.toLowerCase().includes('pricing');
-
-                    if (!isJobHref || !text || isNavOrFooter) return;
-
-                    const abs = toAbs(href);
-                    if (!abs) return;
-
-                    jobAnchors.push({
-                        url: abs,
-                        title: text,
-                    });
-                });
-
-                crawlerLog.info(
-                    `List discovery: found ${jobAnchors.length} candidate job links on page ${pageNo}`,
-                );
-
-                if (!jobAnchors.length) {
-                    const inlineHits = extractInlineHits($.html());
-                    if (inlineHits.length) {
-                        crawlerLog.info(
-                            `No anchors, but found ${inlineHits.length} inline hits on page ${pageNo} - pushing directly.`,
-                        );
-                        for (const hit of inlineHits) {
-                            if (saved >= RESULTS_WANTED) break;
-                            const job = { ...hitToJob(hit, pageNo), _source: 'inline-json' };
+                    for (const hit of hits) {
+                        if (saved >= RESULTS_WANTED) break;
+                        const job = hitToJob(hit, pageNo, language);
+                        if (job.url) {
                             const stored = await pushJob(job);
                             if (stored) {
-                                crawlerLog.info(
-                                    `Saved job ${saved}/${RESULTS_WANTED} from inline JSON: ${
-                                        job.title || job.url
-                                    }`,
-                                );
+                                crawlerLog.info(`Saved job ${saved}/${RESULTS_WANTED}: ${job.title}`);
                             }
                         }
-                    } else {
-                        crawlerLog.warning(
-                            `No job anchors detected on page ${pageNo} and no inline hits. HTML snippet:\n` +
-                                $.html().slice(0, 800),
-                        );
                     }
-                } else {
-                    crawlerLog.debug(
-                        `Sample job anchors on page ${pageNo}: ${jobAnchors
-                            .slice(0, 5)
-                            .map((j) => `${j.title} -> ${j.url}`)
-                            .join(' | ')}`,
-                    );
                 }
 
-                const remaining = RESULTS_WANTED - saved;
-                if (remaining <= 0) {
-                    crawlerLog.info(
-                        `Reached RESULTS_WANTED=${RESULTS_WANTED}, skipping further LIST processing.`,
-                    );
-                    return;
-                }
-
-                const detailUrls = [];
-                for (const job of jobAnchors) {
-                    if (enqueuedDetail.has(job.url)) continue;
-                    enqueuedDetail.add(job.url);
-                    detailUrls.push(job.url);
-                }
-
-                if (detailUrls.length) {
-                    await enqueueLinks({
-                        urls: detailUrls,
-                        userData: { label: 'DETAIL', fromPage: pageNo },
-                    });
-                    crawlerLog.info(
-                        `Enqueued ${detailUrls.length} job detail URLs from page ${pageNo}`,
-                    );
-                }
-
-                // ---------- Pagination ----------
-
+                // Pagination
                 if (saved < RESULTS_WANTED && pageNo < MAX_PAGES) {
                     const nextUrl = buildSearchUrl(pageNo + 1);
                     await enqueueLinks({
                         urls: [nextUrl],
                         userData: { label: 'LIST', pageNo: pageNo + 1 },
                     });
-                    crawlerLog.info(
-                        `Enqueued next LIST page ${pageNo + 1} (${nextUrl}) - saved=${saved}`,
-                    );
-                } else {
-                    crawlerLog.info(
-                        `Stopping pagination. saved=${saved}, pageNo=${pageNo}, MAX_PAGES=${MAX_PAGES}`,
-                    );
+                    crawlerLog.info(`Enqueued next LIST page ${pageNo + 1}`);
                 }
                 return;
             }
@@ -571,9 +485,7 @@ await Actor.main(async () => {
             // ---------------- DETAIL HANDLER ----------------
             if (label === 'DETAIL') {
                 if (saved >= RESULTS_WANTED) {
-                    crawlerLog.info(
-                        `Already reached RESULTS_WANTED=${RESULTS_WANTED}, skipping detail ${request.url}`,
-                    );
+                    crawlerLog.info(`Already reached RESULTS_WANTED=${RESULTS_WANTED}, skipping detail`);
                     return;
                 }
 
@@ -594,54 +506,49 @@ await Actor.main(async () => {
                 };
 
                 if (!job.title && !job.description_text) {
-                    crawlerLog.warning(
-                        `Detail parse yielded empty job for ${request.url}. Snippet:\n${$.html().slice(
-                            0,
-                            800,
-                        )}`,
-                    );
+                    crawlerLog.warning(`Detail parse yielded empty job for ${request.url}`);
                     return;
                 }
 
                 const stored = await pushJob(job);
                 if (stored) {
-                    crawlerLog.info(
-                        `Saved job ${saved}/${RESULTS_WANTED} (${job._source}) from detail: ${job.title || job.url}`,
-                    );
-                } else {
-                    crawlerLog.debug(`Skipped duplicate job detail: ${job.url}`);
+                    crawlerLog.info(`Saved job ${saved}/${RESULTS_WANTED} from detail: ${job.title}`);
                 }
                 return;
             }
         },
     });
 
+    // ---------- Start scraping ----------
+
     const startUrl = buildSearchUrl(1);
     log.info(`Starting actor with mode=${mode}. First URL: ${startUrl}`);
 
-    let apiSaved = 0;
-    if (mode === 'auto' || mode === 'api') {
+    let jsonSaved = 0;
+
+    // Priority 1: JSON extraction mode
+    if (mode === 'auto' || mode === 'json') {
         try {
-            apiSaved = await runAlgoliaMode();
-            log.info(`API branch saved ${apiSaved} items`);
+            jsonSaved = await runJsonMode();
+            log.info(`JSON mode saved ${jsonSaved} items`);
         } catch (err) {
-            log.warning(`API branch failed: ${err.message}`);
+            log.warning(`JSON mode failed: ${err.message}`);
         }
     }
 
-    if ((mode === 'auto' && apiSaved < RESULTS_WANTED) || mode === 'html') {
+    // Priority 2: HTML fallback if JSON didn't get enough results
+    if ((mode === 'auto' && jsonSaved < RESULTS_WANTED) || mode === 'html') {
+        log.info('Running HTML fallback mode via Cheerio crawler');
         await crawler.run([{ url: startUrl, userData: { label: 'LIST', pageNo: 1 } }]);
     }
 
     if (saved === 0) {
-        // Keep this guard to tell you clearly when nothing was scraped.
         throw new Error(
             `Run completed but produced 0 jobs. ` +
-                `Inputs={keyword:"${keyword}", location:"${location}", contract_type:${JSON.stringify(
-                    contract_type,
-                )}, remote:${JSON.stringify(remote)}}. ` +
-                `Mode=${mode} - API and HTML branches both returned 0. Check API filters, ` +
-                `or update HTML selectors / allowlist.`,
+            `Inputs={keyword:"${keyword}", location:"${location}", contract_type:${JSON.stringify(
+                contract_type,
+            )}, remote:${JSON.stringify(remote)}}. ` +
+            `Mode=${mode} - Both JSON and HTML modes returned 0. Check if the website structure has changed.`,
         );
     }
 
