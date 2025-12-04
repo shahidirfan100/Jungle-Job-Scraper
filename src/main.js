@@ -56,54 +56,76 @@ const normalizeRemote = (val) =>
 const extractInitialData = (html) => {
     if (!html) return null;
 
-    // Look for window.__INITIAL_DATA__ = "..." pattern
-    const initialDataMatch = html.match(/window\.__INITIAL_DATA__\s*=\s*"(.+?)"\s*(?:;|\n|<\/script>)/s);
-    if (!initialDataMatch) {
-        log.debug('No __INITIAL_DATA__ found in HTML');
+    // Try multiple patterns to find __INITIAL_DATA__
+    // Pattern 1: window.__INITIAL_DATA__ = "{ escaped JSON }"
+    let match = html.match(/window\.__INITIAL_DATA__\s*=\s*"((?:[^"\\]|\\.)*)"/s);
+
+    if (!match) {
+        // Pattern 2: Try matching until newline
+        match = html.match(/window\.__INITIAL_DATA__\s*=\s*"(.+?)"\s*\n/s);
+    }
+
+    if (!match) {
+        log.warning('No __INITIAL_DATA__ found in HTML');
         return null;
     }
 
     try {
-        // The data is double-escaped JSON string
-        let jsonStr = initialDataMatch[1];
-        // Unescape the string (it's escaped with backslashes)
-        jsonStr = jsonStr.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+        let jsonStr = match[1];
+        log.info(`Found __INITIAL_DATA__, length: ${jsonStr.length} chars`);
+
+        // The data is escaped - unescape it
+        jsonStr = jsonStr
+            .replace(/\\u002F/g, '/')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
+
         const parsed = JSON.parse(jsonStr);
+        log.info(`Parsed __INITIAL_DATA__ successfully, has ${parsed.queries?.length || 0} queries`);
         return parsed;
     } catch (err) {
         log.warning(`Failed to parse __INITIAL_DATA__: ${err.message}`);
+        log.debug(`First 200 chars of data: ${match[1]?.substring(0, 200)}`);
         return null;
     }
 };
 
 const extractJobsFromInitialData = (initialData, language = 'en') => {
-    if (!initialData || !initialData.queries) return [];
+    if (!initialData) {
+        log.warning('No initialData provided');
+        return [];
+    }
 
     const jobs = [];
 
-    for (const query of initialData.queries) {
-        const state = query?.state;
-        if (!state || !state.data) continue;
+    // Check for queries array
+    if (initialData.queries && Array.isArray(initialData.queries)) {
+        log.info(`Processing ${initialData.queries.length} queries from __INITIAL_DATA__`);
 
-        // Check if this is a job hits query
-        const data = state.data;
+        for (const query of initialData.queries) {
+            const state = query?.state;
+            if (!state || !state.data) continue;
 
-        // Handle direct hits array
-        if (data.hits && Array.isArray(data.hits)) {
-            jobs.push(...data.hits);
-        }
+            const data = state.data;
 
-        // Handle nested data structures
-        if (Array.isArray(data)) {
-            for (const item of data) {
-                if (item?.properties?.algolia_query) {
-                    // This might trigger Algolia results, skip for now
-                    continue;
+            // Handle direct hits array (most common for job searches)
+            if (data.hits && Array.isArray(data.hits)) {
+                log.info(`Found ${data.hits.length} hits in query`);
+                jobs.push(...data.hits);
+            }
+
+            // Handle case where data itself is an array of jobs
+            if (Array.isArray(data)) {
+                for (const item of data) {
+                    if (item && item.slug && item.organization) {
+                        jobs.push(item);
+                    }
                 }
             }
         }
     }
 
+    log.info(`Total jobs extracted from __INITIAL_DATA__: ${jobs.length}`);
     return jobs;
 };
 
