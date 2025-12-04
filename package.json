@@ -1,9 +1,9 @@
 {
   "name": "welcometothejungle-jobs-scraper",
   "version": "1.0.0",
-  "description": "Comprehensive Welcome to the Jungle jobs scraper with Algolia API and HTML parsing support.",
+  "description": "Welcome to the Jungle jobs scraper using Playwright for robust dynamic content extraction.",
   "type": "module",
-"dependencies": {
+  "dependencies": {
         "apify": "^3.4.2",
         "crawlee": "^3.13.8",
         "playwright": "1.54.1",
