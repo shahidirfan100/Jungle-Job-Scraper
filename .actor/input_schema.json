@@ -7,16 +7,18 @@
     "keyword": {
       "title": "Search Keyword",
       "type": "string",
-      "description": "Job title, skill, or keyword to search for (e.g., 'Software Engineer', 'Marketing Manager', 'Data Analyst', 'Frontend Developer').",
+      "description": "Job title, skill, or keyword to search for (e.g., 'Software Engineer', 'Marketing Manager', 'Data Analyst', 'Frontend Developer'). Leave empty to search all jobs.",
       "editor": "textfield",
-      "prefill": "software engineer"
+      "prefill": "software engineer",
+      "default": ""
     },
     "location": {
       "title": "Country Code",
       "type": "string",
       "description": "Two-letter country code to filter jobs (e.g., 'US', 'GB', 'FR', 'DE'). Leave empty for worldwide results.",
       "editor": "textfield",
-      "prefill": "US"
+      "prefill": "US",
+      "default": ""
     },
     "contract_type": {
       "title": "Contract Type",
@@ -55,9 +57,10 @@
     "collectDetails": {
       "title": "Collect Full Job Details",
       "type": "boolean",
-      "description": "Visit each job page to extract complete descriptions and additional metadata. Recommended for comprehensive data.",
+      "description": "Visit each job page to extract complete descriptions and additional metadata. Note: Significantly increases runtime and cost.",
       "editor": "checkbox",
-      "default": false
+      "default": false,
+      "prefill": false
     },
     "results_wanted": {
       "title": "Maximum Results",
@@ -65,7 +68,8 @@
       "description": "Maximum number of job listings to extract. Set a higher value to collect more jobs.",
       "minimum": 1,
       "maximum": 1000,
-      "default": 100,
+      "default": 50,
+      "prefill": 50,
       "editor": "number"
     },
     "max_pages": {
@@ -75,18 +79,19 @@
       "minimum": 1,
       "maximum": 100,
       "editor": "number",
-      "default": 20
+      "default": 10,
+      "prefill": 10
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Configure proxy settings for reliable scraping. Residential proxies recommended for best results.",
+      "description": "Configure proxy settings for reliable scraping. Datacenter proxies work well for most use cases. Use residential proxies if you encounter blocking.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": [
-          "RESIDENTIAL"
-        ]
+        "useApifyProxy": true
+      },
+      "prefill": {
+        "useApifyProxy": true
       }
     },
     "mode": {
@@ -115,6 +120,7 @@
       "minimum": 1,
       "maximum": 20,
       "default": 5,
+      "prefill": 5,
       "editor": "number"
     }
   },

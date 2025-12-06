@@ -1,13 +1,15 @@
 {
   "keyword": "software engineer",
   "location": "US",
-  "contract_type": ["full_time", "internship"],
-  "remote": ["fulltime", "partial"],
+  "contract_type": [],
+  "remote": [],
   "results_wanted": 50,
-  "max_pages": 5,
-  "collectDetails": true,
+  "max_pages": 10,
+  "mode": "auto",
+  "language": "en",
+  "collectDetails": false,
+  "maxConcurrency": 5,
   "proxyConfiguration": {
-    "useApifyProxy": true,
-    "apifyProxyGroups": ["RESIDENTIAL"]
+    "useApifyProxy": true
   }
 }

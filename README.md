@@ -27,11 +27,19 @@ Welcome to the Jungle hosts thousands of job opportunities across multiple count
 
 The scraper is optimized for efficiency and cost-effectiveness. Costs depend on the number of jobs extracted and detail level:
 
-- **100 jobs (basic data)**: ~$0.10 - $0.20
-- **500 jobs (with details)**: ~$0.50 - $1.00
-- **1000 jobs (comprehensive)**: ~$1.50 - $3.00
+**Using Datacenter Proxies (default):**
+- **50 jobs (basic data)**: ~$0.003 - $0.01
+- **100 jobs (basic data)**: ~$0.005 - $0.02
+- **500 jobs (basic data)**: ~$0.05 - $0.15
+- **1000 jobs (basic data)**: ~$0.10 - $0.30
 
-*Estimates based on Apify platform pricing. Actual costs vary with proxy usage and extraction depth.*
+**Using Residential Proxies:**
+- **50 jobs**: ~$0.05 - $0.10
+- **100 jobs**: ~$0.10 - $0.20
+- **500 jobs**: ~$0.50 - $1.00
+- **1000 jobs**: ~$1.50 - $3.00
+
+*Note: Enabling `collectDetails` significantly increases runtime and costs. Estimates based on Apify platform pricing.*
 
 ## Performance & Reliability
 
@@ -43,12 +51,17 @@ The scraper includes robust timeout and migration support:
 - **Smart exit**: Stops cleanly when target is reached or timeout occurs
 
 ### Recommended Timeout Settings
-- **100 jobs**: 5-10 minutes
-- **500 jobs**: 15-30 minutes  
-- **1000 jobs**: 30-60 minutes
-- **With collectDetails enabled**: Add 50-100% more time
+- **50 jobs (basic)**: 1-2 minutes
+- **100 jobs (basic)**: 2-5 minutes
+- **500 jobs**: 10-15 minutes  
+- **1000 jobs**: 20-30 minutes
+- **With collectDetails enabled**: Add 100-200% more time
 
 If the actor times out before reaching your target, it will save all collected data and can be resumed with a longer timeout.
+
+### Proxy Configuration
+- **Datacenter proxies** (default): Fast, cost-effective, works well for most use cases
+- **Residential proxies**: Use if you encounter rate limiting or blocking (more expensive)
 
 ## Input Configuration
 
@@ -70,10 +83,10 @@ If the actor times out before reaching your target, it will save all collected d
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `mode` | String | No | Extraction mode: 'auto' (API first, HTML fallback), 'json' (API only), 'html' (HTML only) |
-| `collectDetails` | Boolean | No | Visit job pages for full descriptions (default: false) |
+| `collectDetails` | Boolean | No | Visit job pages for full descriptions (default: false, increases runtime 100-200%) |
 | `maxConcurrency` | Integer | No | Concurrent page processing (default: 5, range: 1-20) |
 | `language` | String | No | Site language code: 'en', 'fr', 'de' (default: 'en') |
-| `proxyConfiguration` | Object | No | Proxy settings - residential proxies recommended |
+| `proxyConfiguration` | Object | No | Proxy settings - datacenter (default) or residential |
 
 ### Example Input
 
