@@ -192,6 +192,17 @@ const buildSearchUrl = ({ language, keyword, location, remote, contract_type, pa
 
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
+    
+    // Add graceful shutdown handler for migrations/timeouts
+    let shouldExit = false;
+    const gracefulShutdown = () => {
+        log.warning('Received termination signal - preparing graceful shutdown');
+        shouldExit = true;
+    };
+    Actor.on('migrating', gracefulShutdown);
+    Actor.on('aborting', gracefulShutdown);
+    process.on('SIGINT', gracefulShutdown);
+    process.on('SIGTERM', gracefulShutdown);
 
     const {
         keyword = '',
@@ -224,10 +235,25 @@ await Actor.main(async () => {
         ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
         : undefined;
 
-    const seenIds = new Set();
-    let saved = 0;
-    let detailsEnriched = 0;
-    const sourceStats = { algolia: 0, html: 0 };
+    // Load previous state if resuming from migration
+    const state = await Actor.getValue('STATE') || {};
+    const seenIds = new Set(state.seenIds || []);
+    let saved = state.saved || 0;
+    let detailsEnriched = state.detailsEnriched || 0;
+    const sourceStats = state.sourceStats || { algolia: 0, html: 0 };
+    
+    // Periodic state saving for migration support
+    let lastStateSave = Date.now();
+    const saveState = async () => {
+        await Actor.setValue('STATE', {
+            seenIds: Array.from(seenIds),
+            saved,
+            detailsEnriched,
+            sourceStats,
+            lastUpdate: new Date().toISOString()
+        });
+        lastStateSave = Date.now();
+    };
 
     const pushJob = async (job) => {
         if (!job) return false;
@@ -236,6 +262,12 @@ await Actor.main(async () => {
         if (id) seenIds.add(id);
         await Dataset.pushData(job);
         saved++;
+        
+        // Save state every 10 jobs or every 30 seconds for migration support
+        if (saved % 10 === 0 || (Date.now() - lastStateSave) > 30000) {
+            await saveState();
+        }
+        
         return true;
     };
 
@@ -247,7 +279,7 @@ await Actor.main(async () => {
             let page = 0;
             let totalPages = 1;
 
-            while (saved < RESULTS_WANTED && page < totalPages) {
+            while (saved < RESULTS_WANTED && page < totalPages && !shouldExit) {
                 const algolia = await fetchAlgoliaPage({
                     keyword,
                     filters,
@@ -260,7 +292,7 @@ await Actor.main(async () => {
                 const hits = algolia.hits || [];
 
                 for (const hit of hits) {
-                    if (saved >= RESULTS_WANTED) break;
+                    if (saved >= RESULTS_WANTED || shouldExit) break;
                     let job = mapAlgoliaHitToJob(hit, language);
 
                     if (collectDetails && job.url) {
@@ -275,8 +307,14 @@ await Actor.main(async () => {
                     if (stored) sourceStats.algolia++;
                 }
 
-                if (hits.length === 0) break;
+                if (hits.length === 0 || shouldExit) break;
                 page += 1;
+                await saveState();
+            }
+            
+            // If we reached target, no need for HTML fallback
+            if (saved >= RESULTS_WANTED) {
+                log.info(`Target of ${RESULTS_WANTED} jobs reached via Algolia API`);
             }
         } catch (err) {
             log.warning(`Algolia path failed, will try HTML fallback: ${err.message}`);
@@ -284,16 +322,17 @@ await Actor.main(async () => {
     }
 
     // ---------- 2) HTML/Playwright fallback ----------
-    const needsHtml = saved < RESULTS_WANTED && (mode === 'auto' || mode === 'html');
+    const needsHtml = saved < RESULTS_WANTED && (mode === 'auto' || mode === 'html') && !shouldExit;
 
     if (needsHtml) {
         const crawler = new PlaywrightCrawler({
             proxyConfiguration: proxyConf,
             maxConcurrency,
             useSessionPool: true,
-            requestHandlerTimeoutSecs: 90,
-            navigationTimeoutSecs: 60,
+            requestHandlerTimeoutSecs: 60,
+            navigationTimeoutSecs: 45,
             headless: true,
+            maxRequestRetries: 2,
             launchContext: {
                 launchOptions: {
                     args: [
@@ -323,12 +362,12 @@ await Actor.main(async () => {
                 crawlerLog.info(`Processing page ${pageNo}: ${request.url}`);
 
                 await page.waitForLoadState('domcontentloaded');
-                await delay(2000);
+                await delay(800);
 
                 try {
                     await page.waitForSelector(
                         'li[data-testid="search-results-list-item"], ol[data-testid="search-results"] li, a[href*="/jobs/"]',
-                        { timeout: 20000 },
+                        { timeout: 15000 },
                     );
                 } catch {
                     const screenshot = await page.screenshot({ type: 'png' });
@@ -336,7 +375,7 @@ await Actor.main(async () => {
                 }
 
                 await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-                await delay(1500);
+                await delay(500);
 
                 let jobCards = await page.$$('li[data-testid="search-results-list-item"]');
                 if (jobCards.length === 0) jobCards = await page.$$('ol[data-testid="search-results"] > li');
@@ -345,7 +384,7 @@ await Actor.main(async () => {
                 crawlerLog.info(`Found ${jobCards.length} potential job cards on page ${pageNo}`);
 
                 for (const card of jobCards) {
-                    if (saved >= RESULTS_WANTED) break;
+                    if (saved >= RESULTS_WANTED || shouldExit) break;
                     try {
                         const jobData = await card.evaluate((el) => {
                             const anchor =
@@ -397,7 +436,10 @@ await Actor.main(async () => {
                     }
                 }
 
-                if (saved < RESULTS_WANTED && pageNo < MAX_PAGES) {
+                // Save state after each page
+                await saveState();
+                
+                if (saved < RESULTS_WANTED && pageNo < MAX_PAGES && !shouldExit) {
                     const nextUrl = buildSearchUrl({
                         language,
                         keyword,
@@ -408,6 +450,10 @@ await Actor.main(async () => {
                     });
                     await crawler.addRequests([{ url: nextUrl, userData: { pageNo: pageNo + 1 } }]);
                     crawlerLog.info(`Enqueued page ${pageNo + 1}`);
+                } else if (saved >= RESULTS_WANTED) {
+                    crawlerLog.info(`Target reached: ${saved}/${RESULTS_WANTED} jobs`);
+                } else if (shouldExit) {
+                    crawlerLog.warning('Graceful shutdown in progress');
                 }
             },
             failedRequestHandler({ request, log: crawlerLog }, error) {
@@ -426,17 +472,34 @@ await Actor.main(async () => {
         ]);
     }
 
-    // ---------- Summary ----------
-    await Actor.pushData({
-        _summary: true,
-        saved,
+    // ---------- Final state save and summary ----------
+    await saveState();
+    
+    const summary = {
+        totalJobs: saved,
+        targetJobs: RESULTS_WANTED,
+        targetReached: saved >= RESULTS_WANTED,
         keyword,
         location,
         mode,
-        source_algolia: sourceStats.algolia,
-        source_html: sourceStats.html,
-        details_enriched: detailsEnriched,
-    });
-
-    log.info(`Finished. Saved ${saved} jobs (algolia: ${sourceStats.algolia}, html: ${sourceStats.html})`);
+        sourceAlgolia: sourceStats.algolia,
+        sourceHtml: sourceStats.html,
+        detailsEnriched,
+        gracefulShutdown: shouldExit,
+        completedAt: new Date().toISOString()
+    };
+    
+    // Store summary in key-value store (not dataset)
+    await Actor.setValue('OUTPUT', summary);
+    
+    log.info('Actor finished', summary);
+    
+    // Exit with appropriate status
+    if (saved === 0) {
+        throw new Error('No jobs were scraped. Please check your input parameters.');
+    }
+    
+    if (saved < RESULTS_WANTED && !shouldExit) {
+        log.warning(`Only ${saved}/${RESULTS_WANTED} jobs scraped. Consider adjusting search parameters or increasing timeout.`);
+    }
 });

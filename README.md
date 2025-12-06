@@ -33,6 +33,23 @@ The scraper is optimized for efficiency and cost-effectiveness. Costs depend on 
 
 *Estimates based on Apify platform pricing. Actual costs vary with proxy usage and extraction depth.*
 
+## Performance & Reliability
+
+### Timeout Handling
+The scraper includes robust timeout and migration support:
+- **Graceful shutdown**: Automatically handles platform timeouts and migrations
+- **State persistence**: Saves progress every 10 jobs and every 30 seconds
+- **Resume capability**: Can continue from where it left off if interrupted
+- **Smart exit**: Stops cleanly when target is reached or timeout occurs
+
+### Recommended Timeout Settings
+- **100 jobs**: 5-10 minutes
+- **500 jobs**: 15-30 minutes  
+- **1000 jobs**: 30-60 minutes
+- **With collectDetails enabled**: Add 50-100% more time
+
+If the actor times out before reaching your target, it will save all collected data and can be resumed with a longer timeout.
+
 ## Input Configuration
 
 ### Basic Parameters
@@ -52,10 +69,11 @@ The scraper is optimized for efficiency and cost-effectiveness. Costs depend on 
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `useAlgoliaAPI` | Boolean | No | Enable fast API extraction (default: true, recommended; falls back to HTML on failures) |
-| `collectDetails` | Boolean | No | Visit job pages for full descriptions (default: true) |
+| `mode` | String | No | Extraction mode: 'auto' (API first, HTML fallback), 'json' (API only), 'html' (HTML only) |
+| `collectDetails` | Boolean | No | Visit job pages for full descriptions (default: false) |
+| `maxConcurrency` | Integer | No | Concurrent page processing (default: 5, range: 1-20) |
+| `language` | String | No | Site language code: 'en', 'fr', 'de' (default: 'en') |
 | `proxyConfiguration` | Object | No | Proxy settings - residential proxies recommended |
-| `algoliaApiKey` | String | No | Optional override if you prefer to supply your own key |
 
 ### Example Input
 
@@ -67,9 +85,10 @@ The scraper is optimized for efficiency and cost-effectiveness. Costs depend on 
   "remote": ["fulltime", "partial"],
   "results_wanted": 100,
   "max_pages": 10,
-  "useAlgoliaAPI": true,
-  "collectDetails": true,
-  "algoliaApiKey": "",
+  "mode": "auto",
+  "language": "en",
+  "collectDetails": false,
+  "maxConcurrency": 5,
   "proxyConfiguration": {
     "useApifyProxy": true,
     "apifyProxyGroups": ["RESIDENTIAL"]
