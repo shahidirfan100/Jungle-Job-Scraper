@@ -6,10 +6,64 @@ import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { load } from 'cheerio';
 
 // ---------- Constants ----------
-const ALGOLIA_APP_ID = 'CSEKHVMS53';
-const ALGOLIA_API_KEY = '4bd8f6215d0cc52b26430765769e65a0';
+// Fallback credentials (used if dynamic extraction fails)
+let ALGOLIA_APP_ID = 'CSEKHVMS53';
+let ALGOLIA_API_KEY = '4bd8f6215d0cc52b26430765769e65a0';
 const DEFAULT_UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+
+// ---------- Dynamic Credential Extraction ----------
+const extractAlgoliaCredentials = async (language = 'en') => {
+    try {
+        const url = `https://www.welcometothejungle.com/${language}/jobs`;
+        log.info('Extracting Algolia credentials from website...');
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+        const res = await fetch(url, {
+            headers: {
+                'user-agent': DEFAULT_UA,
+                'accept': 'text/html,application/xhtml+xml',
+                'accept-language': `${language},en;q=0.9`,
+            },
+            signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+
+        const html = await res.text();
+
+        // Extract from window.env = {...} in script tag
+        // Pattern: "ALGOLIA_APPLICATION_ID":"CSEKHVMS53"
+        const appIdMatch = html.match(/"ALGOLIA_APPLICATION_ID"\s*:\s*"([^"]+)"/);
+        const apiKeyMatch = html.match(/"ALGOLIA_API_KEY_CLIENT"\s*:\s*"([^"]+)"/);
+
+        if (appIdMatch && apiKeyMatch) {
+            const extractedAppId = appIdMatch[1];
+            const extractedApiKey = apiKeyMatch[1];
+
+            // Validate extracted values (app ID should be ~10 chars, API key ~32 chars)
+            if (extractedAppId.length >= 8 && extractedApiKey.length >= 20) {
+                log.info('Successfully extracted Algolia credentials', {
+                    appId: extractedAppId,
+                    apiKeyPrefix: extractedApiKey.slice(0, 8) + '...',
+                });
+                return { appId: extractedAppId, apiKey: extractedApiKey };
+            }
+        }
+
+        log.warning('Could not extract Algolia credentials from HTML, using fallback values');
+        return null;
+    } catch (err) {
+        log.warning(`Credential extraction failed: ${err.message}, using fallback values`);
+        return null;
+    }
+};
 
 // ---------- Helpers ----------
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -231,6 +285,18 @@ const buildSearchUrl = ({ language, keyword, location, remote, contract_type, pa
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
 
+    // Get language early for credential extraction
+    const language = input.language || 'en';
+
+    // Dynamically extract Algolia credentials (in case they change)
+    const extractedCreds = await extractAlgoliaCredentials(language);
+    if (extractedCreds) {
+        ALGOLIA_APP_ID = extractedCreds.appId;
+        ALGOLIA_API_KEY = extractedCreds.apiKey;
+    } else {
+        log.info('Using fallback Algolia credentials');
+    }
+
     // Add graceful shutdown handler for migrations/timeouts
     let shouldExit = false;
     const gracefulShutdown = () => {
@@ -251,7 +317,7 @@ await Actor.main(async () => {
         max_pages: MAX_PAGES_RAW = 5,
         proxyConfiguration,
         maxConcurrency = 5,
-        language = 'en',
+        // language already extracted above for credential fetching
         collectDetails = false,
         mode = 'auto', // auto | json | html
     } = input;
