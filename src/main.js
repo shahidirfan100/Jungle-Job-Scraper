@@ -92,7 +92,7 @@ const mapAlgoliaHitToJob = (hit, language) => {
     };
 };
 
-const fetchAlgoliaPage = async ({ keyword, filters, page, hitsPerPage, language }) => {
+const fetchAlgoliaPage = async ({ keyword, filters, page, hitsPerPage, language, retries = 3 }) => {
     const params = new URLSearchParams();
     if (keyword) params.set('query', keyword);
     params.set('hitsPerPage', hitsPerPage);
@@ -103,26 +103,64 @@ const fetchAlgoliaPage = async ({ keyword, filters, page, hitsPerPage, language 
     params.set('facets', '[]');
     if (filters) params.set('filters', filters);
 
-    const res = await fetch(
-        `https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/wttj_jobs_production_${language}/query`,
-        {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                'x-algolia-application-id': ALGOLIA_APP_ID,
-                'x-algolia-api-key': ALGOLIA_API_KEY,
-                referer: 'https://www.welcometothejungle.com/',
-            },
-            body: JSON.stringify({ params: params.toString() }),
-        },
-    );
+    let lastError = null;
 
-    if (!res.ok) {
-        const text = await res.text().catch(() => res.statusText);
-        throw new Error(`Algolia ${res.status}: ${text?.slice(0, 200)}`);
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            // Create AbortController for timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
+            const res = await fetch(
+                `https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/wttj_jobs_production_${language}/query`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/json',
+                        'accept': 'application/json',
+                        'user-agent': DEFAULT_UA,
+                        'x-algolia-application-id': ALGOLIA_APP_ID,
+                        'x-algolia-api-key': ALGOLIA_API_KEY,
+                        'origin': 'https://www.welcometothejungle.com',
+                        'referer': 'https://www.welcometothejungle.com/',
+                    },
+                    body: JSON.stringify({ params: params.toString() }),
+                    signal: controller.signal,
+                },
+            );
+
+            clearTimeout(timeoutId);
+
+            if (!res.ok) {
+                const text = await res.text().catch(() => res.statusText);
+                throw new Error(`Algolia ${res.status}: ${text?.slice(0, 200)}`);
+            }
+
+            const data = await res.json();
+
+            // Validate response has expected structure
+            if (!data || typeof data.nbPages === 'undefined') {
+                throw new Error('Invalid Algolia response structure');
+            }
+
+            return data;
+        } catch (err) {
+            lastError = err;
+            const isAbort = err.name === 'AbortError';
+            const isNetwork = err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.message.includes('fetch');
+
+            log.warning(`Algolia API attempt ${attempt}/${retries} failed: ${isAbort ? 'Timeout' : err.message}`);
+
+            if (attempt < retries && (isAbort || isNetwork || err.message.includes('5'))) {
+                // Retry on timeout, network errors, or 5xx errors
+                await delay(1000 * attempt); // Exponential backoff
+                continue;
+            }
+            break;
+        }
     }
 
-    return res.json();
+    throw lastError || new Error('Algolia API failed after all retries');
 };
 
 const fetchJobDetail = async (url, language) => {
@@ -192,7 +230,7 @@ const buildSearchUrl = ({ language, keyword, location, remote, contract_type, pa
 
 await Actor.main(async () => {
     const input = (await Actor.getInput()) || {};
-    
+
     // Add graceful shutdown handler for migrations/timeouts
     let shouldExit = false;
     const gracefulShutdown = () => {
@@ -209,8 +247,8 @@ await Actor.main(async () => {
         location = '',
         contract_type = [],
         remote = [],
-        results_wanted: RESULTS_WANTED_RAW = 100,
-        max_pages: MAX_PAGES_RAW = 20,
+        results_wanted: RESULTS_WANTED_RAW = 20,
+        max_pages: MAX_PAGES_RAW = 5,
         proxyConfiguration,
         maxConcurrency = 5,
         language = 'en',
@@ -241,7 +279,7 @@ await Actor.main(async () => {
     let saved = state.saved || 0;
     let detailsEnriched = state.detailsEnriched || 0;
     const sourceStats = state.sourceStats || { algolia: 0, html: 0 };
-    
+
     // Periodic state saving for migration support
     let lastStateSave = Date.now();
     const saveState = async () => {
@@ -262,12 +300,12 @@ await Actor.main(async () => {
         if (id) seenIds.add(id);
         await Dataset.pushData(job);
         saved++;
-        
+
         // Save state every 10 jobs or every 30 seconds for migration support
         if (saved % 10 === 0 || (Date.now() - lastStateSave) > 30000) {
             await saveState();
         }
-        
+
         return true;
     };
 
@@ -311,7 +349,7 @@ await Actor.main(async () => {
                 page += 1;
                 await saveState();
             }
-            
+
             // If we reached target, no need for HTML fallback
             if (saved >= RESULTS_WANTED) {
                 log.info(`Target of ${RESULTS_WANTED} jobs reached via Algolia API`);
@@ -438,7 +476,7 @@ await Actor.main(async () => {
 
                 // Save state after each page
                 await saveState();
-                
+
                 if (saved < RESULTS_WANTED && pageNo < MAX_PAGES && !shouldExit) {
                     const nextUrl = buildSearchUrl({
                         language,
@@ -474,7 +512,7 @@ await Actor.main(async () => {
 
     // ---------- Final state save and summary ----------
     await saveState();
-    
+
     const summary = {
         totalJobs: saved,
         targetJobs: RESULTS_WANTED,
@@ -488,17 +526,17 @@ await Actor.main(async () => {
         gracefulShutdown: shouldExit,
         completedAt: new Date().toISOString()
     };
-    
+
     // Store summary in key-value store (not dataset)
     await Actor.setValue('OUTPUT', summary);
-    
+
     log.info('Actor finished', summary);
-    
+
     // Exit with appropriate status
     if (saved === 0) {
         throw new Error('No jobs were scraped. Please check your input parameters.');
     }
-    
+
     if (saved < RESULTS_WANTED && !shouldExit) {
         log.warning(`Only ${saved}/${RESULTS_WANTED} jobs scraped. Consider adjusting search parameters or increasing timeout.`);
     }

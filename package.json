@@ -1,12 +1,12 @@
 {
-  "name": "welcometothejungle-jobs-scraper",
-  "version": "1.0.0",
-  "description": "Welcome to the Jungle jobs scraper using Playwright for robust dynamic content extraction.",
-  "type": "module",
-  "dependencies": {
-        "apify": "^3.4.2",
-        "crawlee": "^3.13.8",
-        "playwright": "1.54.1",
+    "name": "welcometothejungle-jobs-scraper",
+    "version": "1.0.0",
+    "description": "Welcome to the Jungle jobs scraper using Playwright for robust dynamic content extraction.",
+    "type": "module",
+    "dependencies": {
+        "apify": "^3.5.2",
+        "crawlee": "^3.15.3",
+        "playwright": "1.56.1",
         "cheerio": "^1.0.0-rc.12"
     },
     "devDependencies": {

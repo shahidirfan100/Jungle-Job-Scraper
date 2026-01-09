@@ -68,8 +68,8 @@
       "description": "Maximum number of job listings to extract. Set a higher value to collect more jobs.",
       "minimum": 1,
       "maximum": 1000,
-      "default": 50,
-      "prefill": 50,
+      "default": 20,
+      "prefill": 20,
       "editor": "number"
     },
     "max_pages": {
@@ -79,8 +79,8 @@
       "minimum": 1,
       "maximum": 100,
       "editor": "number",
-      "default": 10,
-      "prefill": 10
+      "default": 5,
+      "prefill": 5
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
