@@ -379,7 +379,7 @@ await Actor.main(async () => {
     if (mode === 'auto' || mode === 'json') {
         try {
             const filters = buildAlgoliaFilter({ location, contract_type, remote });
-            const hitsPerPage = 50;
+            const hitsPerPage = 100; // Maximum for speed
             let page = 0;
             let totalPages = 1;
 
@@ -395,25 +395,76 @@ await Actor.main(async () => {
                 totalPages = Math.min(MAX_PAGES, algolia.nbPages ?? totalPages);
                 const hits = algolia.hits || [];
 
-                for (const hit of hits) {
-                    if (saved >= RESULTS_WANTED || shouldExit) break;
-                    let job = mapAlgoliaHitToJob(hit, language);
+                // Calculate how many jobs we still need
+                const remaining = RESULTS_WANTED - saved;
+                const hitsToProcess = hits.slice(0, remaining);
 
-                    if (collectDetails && job.url) {
-                        const detail = await fetchJobDetail(job.url, language);
-                        if (Object.keys(detail).length) {
-                            job = { ...job, ...detail };
-                            detailsEnriched++;
-                        }
+                if (collectDetails) {
+                    // Parallel detail fetching with concurrency limit for speed
+                    const DETAIL_CONCURRENCY = 5;
+                    const jobs = [];
+
+                    for (let i = 0; i < hitsToProcess.length; i += DETAIL_CONCURRENCY) {
+                        if (shouldExit) break;
+                        const batch = hitsToProcess.slice(i, i + DETAIL_CONCURRENCY);
+                        const batchResults = await Promise.all(
+                            batch.map(async (hit) => {
+                                let job = mapAlgoliaHitToJob(hit, language);
+                                if (job.url) {
+                                    const detail = await fetchJobDetail(job.url, language);
+                                    if (Object.keys(detail).length) {
+                                        job = { ...job, ...detail };
+                                        detailsEnriched++;
+                                    }
+                                }
+                                return job;
+                            })
+                        );
+                        jobs.push(...batchResults);
                     }
 
-                    const stored = await pushJob(job);
-                    if (stored) sourceStats.algolia++;
+                    // Batch push all jobs at once for speed
+                    const uniqueJobs = jobs.filter(job => {
+                        const id = job.job_id || job.url;
+                        if (id && seenIds.has(id)) return false;
+                        if (id) seenIds.add(id);
+                        return true;
+                    });
+
+                    if (uniqueJobs.length > 0) {
+                        await Dataset.pushData(uniqueJobs);
+                        saved += uniqueJobs.length;
+                        sourceStats.algolia += uniqueJobs.length;
+                    }
+                } else {
+                    // No details needed - ultra-fast batch processing
+                    const jobs = hitsToProcess.map(hit => mapAlgoliaHitToJob(hit, language));
+
+                    // Filter duplicates
+                    const uniqueJobs = jobs.filter(job => {
+                        const id = job.job_id || job.url;
+                        if (id && seenIds.has(id)) return false;
+                        if (id) seenIds.add(id);
+                        return true;
+                    });
+
+                    if (uniqueJobs.length > 0) {
+                        // Single batch push - much faster than individual pushes
+                        await Dataset.pushData(uniqueJobs);
+                        saved += uniqueJobs.length;
+                        sourceStats.algolia += uniqueJobs.length;
+                    }
                 }
+
+                log.info(`Algolia page ${page + 1}: fetched ${hitsToProcess.length} jobs, total saved: ${saved}/${RESULTS_WANTED}`);
 
                 if (hits.length === 0 || shouldExit) break;
                 page += 1;
-                await saveState();
+
+                // Save state less frequently for speed (every 50 jobs)
+                if (saved % 50 === 0) {
+                    await saveState();
+                }
             }
 
             // If we reached target, no need for HTML fallback
