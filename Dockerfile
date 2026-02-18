@@ -3,6 +3,10 @@
 # You can also use any other image from Docker Hub.
 FROM apify/actor-node-playwright-chrome:22-1.56.1
 
+# Browsers are already present in this base image; skip any extra downloads.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PUPPETEER_SKIP_DOWNLOAD=1
+
 # Check preinstalled packages
 RUN npm ls crawlee apify puppeteer playwright
 
