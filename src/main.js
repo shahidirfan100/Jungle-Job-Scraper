@@ -4,6 +4,7 @@
 import { Actor, log } from 'apify';
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 import { load } from 'cheerio';
+import { readFile } from 'node:fs/promises';
 
 // ---------- Constants ----------
 // Fallback credentials (used if dynamic extraction fails)
@@ -11,12 +12,16 @@ let ALGOLIA_APP_ID = 'CSEKHVMS53';
 let ALGOLIA_API_KEY = '4bd8f6215d0cc52b26430765769e65a0';
 const DEFAULT_UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+const INTERNAL_SETTINGS = Object.freeze({
+    language: 'en',
+    mode: 'json',
+    maxConcurrency: 5,
+});
 
 // ---------- Dynamic Credential Extraction ----------
 const extractAlgoliaCredentials = async (language = 'en') => {
     try {
         const url = `https://www.welcometothejungle.com/${language}/jobs`;
-        log.info('Extracting Algolia credentials from website...');
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -49,24 +54,31 @@ const extractAlgoliaCredentials = async (language = 'en') => {
 
             // Validate extracted values (app ID should be ~10 chars, API key ~32 chars)
             if (extractedAppId.length >= 8 && extractedApiKey.length >= 20) {
-                log.info('Successfully extracted Algolia credentials', {
-                    appId: extractedAppId,
-                    apiKeyPrefix: extractedApiKey.slice(0, 8) + '...',
-                });
                 return { appId: extractedAppId, apiKey: extractedApiKey };
             }
         }
 
-        log.warning('Could not extract Algolia credentials from HTML, using fallback values');
         return null;
-    } catch (err) {
-        log.warning(`Credential extraction failed: ${err.message}, using fallback values`);
+    } catch {
         return null;
     }
 };
 
 // ---------- Helpers ----------
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hasInputPayload = (value) =>
+    Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0;
+
+const loadInputJsonFallback = async () => {
+    try {
+        const raw = await readFile(new URL('../INPUT.json', import.meta.url), 'utf8');
+        const parsed = JSON.parse(raw);
+        if (hasInputPayload(parsed)) return parsed;
+    } catch {
+        // Silent fallback to built-in defaults
+    }
+    return null;
+};
 
 const toSlugId = (urlOrId) => {
     if (!urlOrId) return null;
@@ -118,6 +130,38 @@ const salaryToString = (hit) => {
     return `${min || max} ${hit.salary_currency}`;
 };
 
+const toPlainText = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    return value
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim() || null;
+};
+
+const compactObject = (obj) => {
+    const compacted = {};
+    for (const [key, value] of Object.entries(obj)) {
+        if (value !== null && value !== undefined) {
+            compacted[key] = value;
+        }
+    }
+    return compacted;
+};
+
+const getAlgoliaJobDescription = (hit) => {
+    const summary = toPlainText(hit.summary);
+    if (summary) return summary;
+
+    const profile = toPlainText(hit.profile);
+    if (profile) return profile;
+
+    if (Array.isArray(hit.key_missions) && hit.key_missions.length) {
+        return hit.key_missions.filter(Boolean).join(' | ') || null;
+    }
+
+    return null;
+};
+
 const mapAlgoliaHitToJob = (hit, language) => {
     const office = hit.offices?.[0] || {};
     const companySlug = hit.organization?.slug;
@@ -128,22 +172,49 @@ const mapAlgoliaHitToJob = (hit, language) => {
 
     const locationParts = [office.city, office.state, office.country].filter(Boolean);
 
-    return {
+    return compactObject({
         job_id: toSlugId(hit.objectID || hit.reference || slug),
+        object_id: hit.objectID || null,
+        reference: hit.reference || null,
+        slug: slug || null,
+        wk_reference: hit.wk_reference || null,
         title: hit.name || null,
         company: hit.organization?.name || null,
         company_slug: companySlug || null,
         location: locationParts.join(', ') || null,
         country: office.country || null,
         contract_type: hit.contract_type || null,
+        contract_duration_minimum: hit.contract_duration_minimum ?? null,
+        contract_duration_maximum: hit.contract_duration_maximum ?? null,
         remote: hit.remote || null,
         salary: salaryToString(hit),
+        salary_currency: hit.salary_currency || null,
+        salary_minimum: hit.salary_minimum ?? null,
+        salary_maximum: hit.salary_maximum ?? null,
+        salary_period: hit.salary_period || null,
+        salary_yearly_minimum: hit.salary_yearly_minimum ?? null,
+        education_level: hit.education_level || null,
+        experience_level_minimum: hit.experience_level_minimum ?? null,
         date_posted: hit.published_at || hit.published_at_date || null,
+        published_at_timestamp: hit.published_at_timestamp ?? null,
         url,
         tags: hit.sectors?.map((s) => s.name).filter(Boolean) || [],
+        sectors: hit.sectors || [],
+        summary: hit.summary || null,
+        profile: hit.profile || null,
+        key_missions: Array.isArray(hit.key_missions) ? hit.key_missions.filter(Boolean) : [],
+        benefits: Array.isArray(hit.benefits) ? hit.benefits.filter(Boolean) : [],
+        job_description: getAlgoliaJobDescription(hit),
+        job_description_html: hit.profile || null,
+        has_benefits: hit.has_benefits ?? null,
+        has_contract_duration: hit.has_contract_duration ?? null,
+        has_education_level: hit.has_education_level ?? null,
+        has_experience_level_minimum: hit.has_experience_level_minimum ?? null,
+        has_remote: hit.has_remote ?? null,
+        has_salary_yearly_minimum: hit.has_salary_yearly_minimum ?? null,
         _source: 'algolia',
         _fetched_at: new Date().toISOString(),
-    };
+    });
 };
 
 const fetchAlgoliaPage = async ({ keyword, filters, page, hitsPerPage, language, retries = 3 }) => {
@@ -203,8 +274,6 @@ const fetchAlgoliaPage = async ({ keyword, filters, page, hitsPerPage, language,
             const isAbort = err.name === 'AbortError';
             const isNetwork = err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND' || err.message.includes('fetch');
 
-            log.warning(`Algolia API attempt ${attempt}/${retries} failed: ${isAbort ? 'Timeout' : err.message}`);
-
             if (attempt < retries && (isAbort || isNetwork || err.message.includes('5'))) {
                 // Retry on timeout, network errors, or 5xx errors
                 await delay(1000 * attempt); // Exponential backoff
@@ -257,14 +326,15 @@ const fetchJobDetail = async (url, language) => {
         const descriptionHtml = jobLd.description || null;
         const descriptionText = descriptionHtml ? load(descriptionHtml).text().trim() : null;
 
-        return {
+        return compactObject({
             description_html: descriptionHtml,
             description_text: descriptionText,
+            job_description_html: descriptionHtml,
+            job_description: descriptionText,
             date_posted: jobLd.datePosted || jobLd.datePublished || jobLd.validThrough || null,
             employment_type: jobLd.employmentType || null,
-        };
-    } catch (err) {
-        log.debug(`Detail fetch failed for ${url}: ${err.message}`);
+        });
+    } catch {
         return {};
     }
 };
@@ -283,24 +353,29 @@ const buildSearchUrl = ({ language, keyword, location, remote, contract_type, pa
 // ---------- Main actor ----------
 
 await Actor.main(async () => {
-    const input = (await Actor.getInput()) || {};
+    const actorInput = (await Actor.getInput()) || {};
+    let input = actorInput;
+    if (!hasInputPayload(actorInput)) {
+        const fallbackInput = await loadInputJsonFallback();
+        if (fallbackInput) {
+            input = fallbackInput;
+        }
+    }
 
-    // Get language early for credential extraction
-    const language = input.language || 'en';
+    const language = INTERNAL_SETTINGS.language;
+    const mode = INTERNAL_SETTINGS.mode;
+    const maxConcurrency = INTERNAL_SETTINGS.maxConcurrency;
 
     // Dynamically extract Algolia credentials (in case they change)
     const extractedCreds = await extractAlgoliaCredentials(language);
     if (extractedCreds) {
         ALGOLIA_APP_ID = extractedCreds.appId;
         ALGOLIA_API_KEY = extractedCreds.apiKey;
-    } else {
-        log.info('Using fallback Algolia credentials');
     }
 
     // Add graceful shutdown handler for migrations/timeouts
     let shouldExit = false;
     const gracefulShutdown = () => {
-        log.warning('Received termination signal - preparing graceful shutdown');
         shouldExit = true;
     };
     Actor.on('migrating', gracefulShutdown);
@@ -316,28 +391,11 @@ await Actor.main(async () => {
         results_wanted: RESULTS_WANTED_RAW = 20,
         max_pages: MAX_PAGES_RAW = 5,
         proxyConfiguration,
-        maxConcurrency = 5,
-        // language already extracted above for credential fetching
         collectDetails = false,
-        mode = 'auto', // auto | json | html
     } = input;
 
-    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 100;
-    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
-
-    log.info('Actor input', {
-        keyword,
-        location,
-        RESULTS_WANTED,
-        MAX_PAGES,
-        language,
-        mode,
-        collectDetails,
-    });
-
-    const proxyConf = proxyConfiguration
-        ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
-        : undefined;
+    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
+    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 5;
 
     // Load previous state if resuming from migration
     const state = await Actor.getValue('STATE') || {};
@@ -361,10 +419,11 @@ await Actor.main(async () => {
 
     const pushJob = async (job) => {
         if (!job) return false;
-        const id = job.job_id || job.url;
+        const compactJob = compactObject(job);
+        const id = compactJob.job_id || compactJob.url;
         if (id && seenIds.has(id)) return false;
         if (id) seenIds.add(id);
-        await Dataset.pushData(job);
+        await Dataset.pushData(compactJob);
         saved++;
 
         // Save state every 10 jobs or every 30 seconds for migration support
@@ -435,6 +494,7 @@ await Actor.main(async () => {
                         await Dataset.pushData(uniqueJobs);
                         saved += uniqueJobs.length;
                         sourceStats.algolia += uniqueJobs.length;
+                        log.info(`Pushed ${uniqueJobs.length} jobs. Total: ${saved}/${RESULTS_WANTED}`);
                     }
                 } else {
                     // No details needed - ultra-fast batch processing
@@ -453,10 +513,9 @@ await Actor.main(async () => {
                         await Dataset.pushData(uniqueJobs);
                         saved += uniqueJobs.length;
                         sourceStats.algolia += uniqueJobs.length;
+                        log.info(`Pushed ${uniqueJobs.length} jobs. Total: ${saved}/${RESULTS_WANTED}`);
                     }
                 }
-
-                log.info(`Algolia page ${page + 1}: fetched ${hitsToProcess.length} jobs, total saved: ${saved}/${RESULTS_WANTED}`);
 
                 if (hits.length === 0 || shouldExit) break;
                 page += 1;
@@ -467,12 +526,8 @@ await Actor.main(async () => {
                 }
             }
 
-            // If we reached target, no need for HTML fallback
-            if (saved >= RESULTS_WANTED) {
-                log.info(`Target of ${RESULTS_WANTED} jobs reached via Algolia API`);
-            }
-        } catch (err) {
-            log.warning(`Algolia path failed, will try HTML fallback: ${err.message}`);
+        } catch {
+            // Silent here; final empty-data guard throws a clear error if needed.
         }
     }
 
@@ -480,14 +535,32 @@ await Actor.main(async () => {
     const needsHtml = saved < RESULTS_WANTED && (mode === 'auto' || mode === 'html') && !shouldExit;
 
     if (needsHtml) {
+        const proxyConf = proxyConfiguration
+            ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
+            : undefined;
+
         const crawler = new PlaywrightCrawler({
             proxyConfiguration: proxyConf,
             maxConcurrency,
             useSessionPool: true,
+            sessionPoolOptions: {
+                maxPoolSize: 5,
+                sessionOptions: { maxUsageCount: 3 },
+            },
             requestHandlerTimeoutSecs: 60,
             navigationTimeoutSecs: 45,
             headless: true,
             maxRequestRetries: 2,
+            browserPoolOptions: {
+                useFingerprints: true,
+                fingerprintOptions: {
+                    fingerprintGeneratorOptions: {
+                        browsers: ['chrome'],
+                        operatingSystems: ['windows', 'macos'],
+                        devices: ['desktop'],
+                    },
+                },
+            },
             launchContext: {
                 launchOptions: {
                     args: [
@@ -505,16 +578,20 @@ await Actor.main(async () => {
                         'accept-language': `${language},en;q=0.9`,
                     });
                     await page.addInitScript(() => {
-                        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                        window.chrome = window.chrome || { runtime: {} };
                     });
-                    await page.route('**/*.{png,jpg,jpeg,gif,svg,webp,ico,woff,woff2,ttf}', (route) => route.abort());
+                    await page.route('**/*.{png,jpg,jpeg,gif,svg,webp,ico,woff,woff2,ttf,mp4,webm,mp3,wav}', (route) => route.abort());
                     await page.route('**/analytics**', (route) => route.abort());
                     await page.route('**/tracking**', (route) => route.abort());
+                    await page.route('**/googletagmanager**', (route) => route.abort());
+                    await page.route('**/doubleclick**', (route) => route.abort());
                 },
             ],
             async requestHandler({ page, request, log: crawlerLog, crawler }) {
                 const { pageNo } = request.userData;
-                crawlerLog.info(`Processing page ${pageNo}: ${request.url}`);
 
                 await page.waitForLoadState('domcontentloaded');
                 await delay(800);
@@ -535,8 +612,6 @@ await Actor.main(async () => {
                 let jobCards = await page.$$('li[data-testid="search-results-list-item"]');
                 if (jobCards.length === 0) jobCards = await page.$$('ol[data-testid="search-results"] > li');
                 if (jobCards.length === 0) jobCards = await page.$$('a[href*="/jobs/"]');
-
-                crawlerLog.info(`Found ${jobCards.length} potential job cards on page ${pageNo}`);
 
                 for (const card of jobCards) {
                     if (saved >= RESULTS_WANTED || shouldExit) break;
@@ -586,8 +661,8 @@ await Actor.main(async () => {
 
                         const stored = await pushJob(job);
                         if (stored) sourceStats.html++;
-                    } catch (err) {
-                        crawlerLog.warning(`Card extract failed: ${err.message}`);
+                    } catch {
+                        // Skip malformed cards silently
                     }
                 }
 
@@ -604,11 +679,6 @@ await Actor.main(async () => {
                         page: pageNo + 1,
                     });
                     await crawler.addRequests([{ url: nextUrl, userData: { pageNo: pageNo + 1 } }]);
-                    crawlerLog.info(`Enqueued page ${pageNo + 1}`);
-                } else if (saved >= RESULTS_WANTED) {
-                    crawlerLog.info(`Target reached: ${saved}/${RESULTS_WANTED} jobs`);
-                } else if (shouldExit) {
-                    crawlerLog.warning('Graceful shutdown in progress');
                 }
             },
             failedRequestHandler({ request, log: crawlerLog }, error) {
@@ -617,7 +687,6 @@ await Actor.main(async () => {
         });
 
         const startUrl = buildSearchUrl({ language, keyword, location, remote, contract_type, page: 1 });
-        log.info(`Starting Playwright fallback. First URL: ${startUrl}`);
 
         await crawler.run([
             {
@@ -647,14 +716,9 @@ await Actor.main(async () => {
     // Store summary in key-value store (not dataset)
     await Actor.setValue('OUTPUT', summary);
 
-    log.info('Actor finished', summary);
-
     // Exit with appropriate status
     if (saved === 0) {
         throw new Error('No jobs were scraped. Please check your input parameters.');
     }
 
-    if (saved < RESULTS_WANTED && !shouldExit) {
-        log.warning(`Only ${saved}/${RESULTS_WANTED} jobs scraped. Consider adjusting search parameters or increasing timeout.`);
-    }
 });

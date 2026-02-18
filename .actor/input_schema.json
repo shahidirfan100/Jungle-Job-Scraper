@@ -1,6 +1,6 @@
 {
   "title": "Welcome to the Jungle Jobs Scraper",
-  "description": "Extract job listings from Welcome to the Jungle using JSON extraction (fast) or HTML parsing (fallback). Filter by keyword, location, contract type, and remote work options.",
+  "description": "Extract job listings from Welcome to the Jungle with fast collection and built-in reliability fallback. Filter by keyword, location, contract type, and remote work options.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
@@ -36,7 +36,8 @@
           "fixed_term"
         ]
       },
-      "default": []
+      "default": [],
+      "prefill": []
     },
     "remote": {
       "title": "Remote Work Options",
@@ -52,7 +53,8 @@
           "no"
         ]
       },
-      "default": []
+      "default": [],
+      "prefill": []
     },
     "collectDetails": {
       "title": "Collect Full Job Details",
@@ -88,40 +90,8 @@
       "description": "Configure proxy settings for reliable scraping. Datacenter proxies work well for most use cases. Use residential proxies if you encounter blocking.",
       "editor": "proxy",
       "default": {
-        "useApifyProxy": true
-      },
-      "prefill": {
-        "useApifyProxy": true
+        "useApifyProxy": false
       }
-    },
-    "mode": {
-      "title": "Extraction Mode",
-      "type": "string",
-      "description": "Choose extraction method: 'auto' (tries JSON first, falls back to HTML), 'json' (fast, JSON data only), 'html' (pure HTML parsing).",
-      "editor": "select",
-      "enum": [
-        "auto",
-        "json",
-        "html"
-      ],
-      "default": "auto"
-    },
-    "language": {
-      "title": "Language/Region",
-      "type": "string",
-      "description": "Language code for the site (e.g., 'en', 'fr', 'de'). Affects URL paths and content.",
-      "editor": "textfield",
-      "default": "en"
-    },
-    "maxConcurrency": {
-      "title": "Maximum Concurrency",
-      "type": "integer",
-      "description": "Maximum number of pages to process concurrently. Higher values = faster but more resource-intensive. Recommended: 3-10.",
-      "minimum": 1,
-      "maximum": 20,
-      "default": 5,
-      "prefill": 5,
-      "editor": "number"
     }
   },
   "required": []

@@ -6,9 +6,9 @@ FROM apify/actor-node-playwright-chrome:22-1.56.1
 # Check preinstalled packages
 RUN npm ls crawlee apify puppeteer playwright
 
-# Copy just package.json and package-lock.json
+# Copy just package files and version check script
 # to speed up the build using Docker layer cache.
-COPY --chown=myuser:myuser package*.json Dockerfile ./
+COPY --chown=myuser:myuser package*.json Dockerfile check-playwright-version.mjs ./
 
 # Check Playwright version is the same as the one from base image.
 RUN node check-playwright-version.mjs
