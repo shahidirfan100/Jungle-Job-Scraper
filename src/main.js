@@ -17,6 +17,22 @@ const INTERNAL_SETTINGS = Object.freeze({
     mode: 'json',
     maxConcurrency: 5,
 });
+const CONTRACT_TYPE_ENUM = new Set(['full_time', 'part_time', 'internship', 'apprenticeship', 'freelance', 'fixed_term']);
+const REMOTE_ENUM = new Set(['fulltime', 'partial', 'punctual', 'no']);
+const IMPORTANT_JOB_KEYS = [
+    'job_id',
+    'title',
+    'company',
+    'location',
+    'country',
+    'contract_type',
+    'remote',
+    'salary',
+    'date_posted',
+    'url',
+    'job_description',
+    'job_description_html',
+];
 
 // ---------- Dynamic Credential Extraction ----------
 const extractAlgoliaCredentials = async (language = 'en') => {
@@ -148,6 +164,52 @@ const compactObject = (obj) => {
     return compacted;
 };
 
+const orderJobFields = (job) => {
+    const ordered = {};
+    for (const key of IMPORTANT_JOB_KEYS) {
+        if (key in job) ordered[key] = job[key];
+    }
+    for (const [key, value] of Object.entries(job)) {
+        if (!(key in ordered)) ordered[key] = value;
+    }
+    return ordered;
+};
+
+const finalizeJobOutput = (job) => orderJobFields(compactObject(job));
+
+const clampInteger = (value, min, max, fallback) => {
+    const num = Number.parseInt(value, 10);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(max, Math.max(min, num));
+};
+
+const normalizeString = (value) => (typeof value === 'string' ? value.trim() : '');
+
+const normalizeEnumArray = (value, allowedSet) => {
+    const source = Array.isArray(value) ? value : (typeof value === 'string' && value ? [value] : []);
+    return source
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => allowedSet.has(item));
+};
+
+const normalizeInputBySchema = (rawInput = {}) => {
+    const input = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) ? rawInput : {};
+    const proxyConfiguration = input.proxyConfiguration && typeof input.proxyConfiguration === 'object' && !Array.isArray(input.proxyConfiguration)
+        ? input.proxyConfiguration
+        : undefined;
+
+    return {
+        keyword: normalizeString(input.keyword),
+        location: normalizeString(input.location).toUpperCase(),
+        contract_type: normalizeEnumArray(input.contract_type, CONTRACT_TYPE_ENUM),
+        remote: normalizeEnumArray(input.remote, REMOTE_ENUM),
+        collectDetails: Boolean(input.collectDetails),
+        results_wanted: clampInteger(input.results_wanted, 1, 1000, 20),
+        max_pages: clampInteger(input.max_pages, 1, 100, 5),
+        proxyConfiguration,
+    };
+};
+
 const getAlgoliaJobDescription = (hit) => {
     const summary = toPlainText(hit.summary);
     if (summary) return summary;
@@ -172,7 +234,7 @@ const mapAlgoliaHitToJob = (hit, language) => {
 
     const locationParts = [office.city, office.state, office.country].filter(Boolean);
 
-    return compactObject({
+    return finalizeJobOutput({
         job_id: toSlugId(hit.objectID || hit.reference || slug),
         object_id: hit.objectID || null,
         reference: hit.reference || null,
@@ -361,6 +423,7 @@ await Actor.main(async () => {
             input = fallbackInput;
         }
     }
+    const normalizedInput = normalizeInputBySchema(input);
 
     const language = INTERNAL_SETTINGS.language;
     const mode = INTERNAL_SETTINGS.mode;
@@ -384,18 +447,15 @@ await Actor.main(async () => {
     process.on('SIGTERM', gracefulShutdown);
 
     const {
-        keyword = '',
-        location = '',
-        contract_type = [],
-        remote = [],
-        results_wanted: RESULTS_WANTED_RAW = 20,
-        max_pages: MAX_PAGES_RAW = 5,
+        keyword,
+        location,
+        contract_type,
+        remote,
+        results_wanted: RESULTS_WANTED,
+        max_pages: MAX_PAGES,
         proxyConfiguration,
-        collectDetails = false,
-    } = input;
-
-    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
-    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 5;
+        collectDetails,
+    } = normalizedInput;
 
     // Load previous state if resuming from migration
     const state = await Actor.getValue('STATE') || {};
@@ -419,7 +479,7 @@ await Actor.main(async () => {
 
     const pushJob = async (job) => {
         if (!job) return false;
-        const compactJob = compactObject(job);
+        const compactJob = finalizeJobOutput(job);
         const id = compactJob.job_id || compactJob.url;
         if (id && seenIds.has(id)) return false;
         if (id) seenIds.add(id);
@@ -472,7 +532,7 @@ await Actor.main(async () => {
                                 if (job.url) {
                                     const detail = await fetchJobDetail(job.url, language);
                                     if (Object.keys(detail).length) {
-                                        job = { ...job, ...detail };
+                                        job = finalizeJobOutput({ ...job, ...detail });
                                         detailsEnriched++;
                                     }
                                 }
@@ -491,7 +551,7 @@ await Actor.main(async () => {
                     });
 
                     if (uniqueJobs.length > 0) {
-                        await Dataset.pushData(uniqueJobs);
+                        await Dataset.pushData(uniqueJobs.map(finalizeJobOutput));
                         saved += uniqueJobs.length;
                         sourceStats.algolia += uniqueJobs.length;
                         log.info(`Pushed ${uniqueJobs.length} jobs. Total: ${saved}/${RESULTS_WANTED}`);
@@ -510,7 +570,7 @@ await Actor.main(async () => {
 
                     if (uniqueJobs.length > 0) {
                         // Single batch push - much faster than individual pushes
-                        await Dataset.pushData(uniqueJobs);
+                        await Dataset.pushData(uniqueJobs.map(finalizeJobOutput));
                         saved += uniqueJobs.length;
                         sourceStats.algolia += uniqueJobs.length;
                         log.info(`Pushed ${uniqueJobs.length} jobs. Total: ${saved}/${RESULTS_WANTED}`);
